@@ -1,0 +1,42 @@
+.loadSuccess {
+  background-color: green;
+
+  animation: success-fade 2s forwards;
+  animation-delay: 5s;
+}
+
+@keyframes success-fade {
+  from {background-color : green;}
+  to {background-color : #DDD;}
+}
+
+@-webkit-keyframes fadeOut {
+  from {opacity: 1;}
+  to {opacity: 0;}
+}
+
+@keyframes fadeOut {
+  from {opacity: 1;}
+  to {opacity: 0;}
+}
+
+.loadFailure {
+  background-color: darkred;
+}
+
+div {
+  display:inline-block;
+  color:#444;
+  border:1px solid #CCC;
+  background:#DDD;
+  box-shadow: 0 0 5px -1px rgba(0,0,0,0.2);
+  cursor:pointer;
+  vertical-align:middle;
+  max-width: 100px;
+  padding: 5px;
+  text-align: center;
+}
+
+li {
+  list-style: none;
+}

@@ -54,7 +54,12 @@ type OnlineStreamer struct {
 	Title string
 }
 
+type CastJSONResponse struct {
+	Success bool `json:"success"`
+}
+
 func main() {
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/gui/twitch-channel-list", twitchChannelList)
 	http.HandleFunc("/gui/cast/", castTwitch)
 	http.ListenAndServe(":3010", nil)
@@ -94,7 +99,17 @@ func castTwitch(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	fmt.Fprintln(w, "Casting ...")
+
+	castJSONResponse := CastJSONResponse{true}
+	jsonResponse, err := json.Marshal(castJSONResponse)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonResponse)
 }
 
 func twitchChannelList(w http.ResponseWriter, r *http.Request) {
@@ -119,12 +134,33 @@ func twitchChannelList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"/static/style.css\"></head><body>")
+	fmt.Fprintf(w, `<script>
+										function castStreamer(streamer, element) {
+											const Http = new XMLHttpRequest();
+											const url='/gui/cast/' + streamer;
+											Http.open("GET", url);
 
-	fmt.Fprintf(w, "<html><head></head><body>")
+											element.classList.remove("loadFailure");
+											element.classList.remove("loadSuccess");
+
+											Http.onreadystatechange = (e) => {
+												if (Http.readyState === 4 && Http.status === 200) {
+													if (JSON.parse(Http.responseText).success === true) {
+														element.classList.add("loadSuccess");
+													}
+													else {
+														element.classList.add("loadFailure");
+													}
+												}
+											}											
+											Http.send();
+										}
+									</script>`)
 	fmt.Fprintf(w, "<h1>Online Users</h1>")
 	fmt.Fprintf(w, "<ul>")
 	for _, user := range onlineStreamers {
-		fmt.Fprintf(w, "<li style='margin-bottom: 5px; font-size: large'><a href=\"/gui/cast/"+user.Name+"\">"+user.Name+"</a><p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+"</p><p style='margin-top: 0px'>"+user.Title+"</p></li>")
+		fmt.Fprintf(w, "<li style='margin-bottom: 5px; font-size: large'><div onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</div><p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+"</p><p style='margin-top: 0px'>"+user.Title+"</p></li>")
 	}
 	fmt.Fprintf(w, "</ul>")
 	fmt.Fprintf(w, "</body></html>")
