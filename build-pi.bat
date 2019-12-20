@@ -1,7 +1,8 @@
-set GOOS=linux 
+set GOOS=linux
 set GOARCH=arm
-set GOARM=5 
+set GOARM=5
 go build
-set GOOS= 
+set GOOS=
 set GOARCH=
-set GOARM= 
+set GOARM=
+scp twitch-caster pi@raspberrypi:
