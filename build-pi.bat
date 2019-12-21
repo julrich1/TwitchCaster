@@ -5,4 +5,4 @@ go build
 set GOOS=
 set GOARCH=
 set GOARM=
-scp twitch-caster pi@raspberrypi:
+scp -r twitch-caster static pi@raspberrypi:

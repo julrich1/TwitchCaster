@@ -59,7 +59,7 @@ type CastJSONResponse struct {
 }
 
 func main() {
-	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+	http.Handle("/gui/static/", http.StripPrefix("/gui/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/gui/twitch-channel-list", twitchChannelList)
 	http.HandleFunc("/gui/cast/", castTwitch)
 	http.ListenAndServe(":3010", nil)
@@ -134,7 +134,7 @@ func twitchChannelList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"/static/style.css\"></head><body>")
+	fmt.Fprintf(w, "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"static/style.css\"></head><body>")
 	fmt.Fprintf(w, `<script>
 										function castStreamer(streamer, element) {
 											const Http = new XMLHttpRequest();
@@ -160,7 +160,7 @@ func twitchChannelList(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "<h1>Online Users</h1>")
 	fmt.Fprintf(w, "<ul>")
 	for _, user := range onlineStreamers {
-		fmt.Fprintf(w, "<li style='margin-bottom: 5px; font-size: large'><div onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</div><p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+"</p><p style='margin-top: 0px'>"+user.Title+"</p></li>")
+		fmt.Fprintf(w, "<li style='margin-bottom: 5px; font-size: large'><button onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</button><p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+"</p><p style='margin-top: 0px'>"+user.Title+"</p></li>")
 	}
 	fmt.Fprintf(w, "</ul>")
 	fmt.Fprintf(w, "</body></html>")
