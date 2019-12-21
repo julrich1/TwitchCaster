@@ -28,6 +28,10 @@
   background-color: darkred;
 }
 
+body {
+  background-color: black;
+}
+
 button {
   display:inline-block;
   color:#444;
@@ -41,6 +45,11 @@ button {
   font-size: 48px;
 }
 
+h1 {
+  color: white;
+}
+
 li {
   list-style: none;
+  color: white;
 }

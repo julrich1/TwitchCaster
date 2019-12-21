@@ -40,6 +40,28 @@ type OnlineUsersResponse struct {
 	} `json:"data"`
 }
 
+func (onlineUsersResponse OnlineUsersResponse) makeOnlineStreamers(gameIDToNameMap map[string]string) []OnlineStreamer {
+	onlineStreamers := make([]OnlineStreamer, 0, len(onlineUsersResponse.Data))
+	for _, user := range onlineUsersResponse.Data {
+		thumbnailURL := strings.Replace(user.ThumbnailURL, "{width}", "320", -1)
+		thumbnailURL = strings.Replace(thumbnailURL, "{height}", "180", -1)
+		gameName, ok := gameIDToNameMap[user.GameID]
+		if !ok {
+			gameName = "Unknown"
+		}
+
+		onlineStreamer := OnlineStreamer{
+			user.UserName,
+			gameName,
+			user.Title,
+			thumbnailURL,
+			strconv.Itoa(user.ViewerCount),
+		}
+		onlineStreamers = append(onlineStreamers, onlineStreamer)
+	}
+	return onlineStreamers
+}
+
 type StreamLinkResponse struct {
 	URL string `json:"url"`
 }
@@ -139,33 +161,34 @@ func twitchChannelList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"static/style.css\"></head><body>")
-	fmt.Fprintf(w, `<script>
-										function castStreamer(streamer, element) {
-											const Http = new XMLHttpRequest();
-											const url='/gui/cast/' + streamer;
-											Http.open("GET", url);
+	fmt.Fprintf(w, "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"static/style.css\"><link rel=\"icon\" type=\"image/x-icon\" href=\"/gui/static/favicon.ico\"/></head><body>")
+	fmt.Fprintf(w,
+		`<script>
+			function castStreamer(streamer, element) {
+				const Http = new XMLHttpRequest();
+				const url='/gui/cast/' + streamer;
+				Http.open("GET", url);
 
-											element.classList.remove("loadFailure");
-											element.classList.remove("loadSuccess");
+				element.classList.remove("loadFailure");
+				element.classList.remove("loadSuccess");
 
-											Http.onreadystatechange = (e) => {
-												if (Http.readyState === 4 && Http.status === 200) {
-													if (JSON.parse(Http.responseText).success === true) {
-														element.classList.add("loadSuccess");
-													}
-													else {
-														element.classList.add("loadFailure");
-													}
-												}
-											}											
-											Http.send();
-										}
-									</script>`)
+				Http.onreadystatechange = (e) => {
+					if (Http.readyState === 4 && Http.status === 200) {
+						if (JSON.parse(Http.responseText).success === true) {
+							element.classList.add("loadSuccess");
+						}
+						else {
+							element.classList.add("loadFailure");
+						}
+					}
+				}											
+				Http.send();
+			}
+		</script>`)
 	fmt.Fprintf(w, "<h1>Online Users</h1>")
 	fmt.Fprintf(w, "<ul>")
 	for _, user := range onlineStreamers {
-		fmt.Fprintf(w, "<li style='margin-bottom: 5px; font-size: large'><img src=\""+user.ThumbnailURL+"\"><br><button onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</button><p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+" - Viewers: "+user.ViewerCount+"</p><p style='margin-top: 0px'>"+user.Title+"</p></li>")
+		fmt.Fprintf(w, "<li style='margin-bottom: 5px; font-size: large'><img src=\""+user.ThumbnailURL+"\"><br><button onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</button><p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+" - Viewers: <script>document.write(parseInt("+user.ViewerCount+").toLocaleString())</script></p><p style='margin-top: 0px'>"+user.Title+"</p></li>")
 	}
 	fmt.Fprintf(w, "</ul>")
 	fmt.Fprintf(w, "</body></html>")
@@ -245,13 +268,13 @@ func fetchGames(client http.Client, onlineUsers OnlineUsersResponse) ([]OnlineSt
 	var onlineStreamers []OnlineStreamer
 	var gamesResponse GamesResponse
 
-	q := gamesRequest.URL.Query()
-	q.Add("first", "100")
+	query := gamesRequest.URL.Query()
+	query.Add("first", "100")
 	for key := range gamesMap {
-		q.Add("id", key)
+		query.Add("id", key)
 	}
 
-	gamesRequest.URL.RawQuery = q.Encode()
+	gamesRequest.URL.RawQuery = query.Encode()
 
 	gamesRes, error := client.Do(gamesRequest)
 	if error != nil {
@@ -276,18 +299,5 @@ func fetchGames(client http.Client, onlineUsers OnlineUsersResponse) ([]OnlineSt
 		gameIDToNameMap[game.ID] = game.Name
 	}
 
-	for _, user := range onlineUsers.Data {
-		thumbnailURL := strings.Replace(user.ThumbnailURL, "{width}", "320", -1)
-		thumbnailURL = strings.Replace(thumbnailURL, "{height}", "180", -1)
-
-		onlineStreamer := OnlineStreamer{
-			user.UserName,
-			gameIDToNameMap[user.GameID],
-			user.Title,
-			thumbnailURL,
-			strconv.Itoa(user.ViewerCount),
-		}
-		onlineStreamers = append(onlineStreamers, onlineStreamer)
-	}
-	return onlineStreamers, nil
+	return onlineUsers.makeOnlineStreamers(gameIDToNameMap), nil
 }
