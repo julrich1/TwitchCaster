@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	apikeys "twitch-caster/api-keys"
@@ -31,9 +32,11 @@ type FollowInfo struct {
 
 type OnlineUsersResponse struct {
 	Data []struct {
-		UserName string `json:"user_name"`
-		GameID   string `json:"game_id"`
-		Title    string `json:"title"`
+		UserName     string `json:"user_name"`
+		GameID       string `json:"game_id"`
+		Title        string `json:"title"`
+		ThumbnailURL string `json:"thumbnail_url"`
+		ViewerCount  int    `json:"viewer_count"`
 	} `json:"data"`
 }
 
@@ -49,9 +52,11 @@ type GamesResponse struct {
 }
 
 type OnlineStreamer struct {
-	Name  string
-	Game  string
-	Title string
+	Name         string
+	Game         string
+	Title        string
+	ThumbnailURL string
+	ViewerCount  string
 }
 
 type CastJSONResponse struct {
@@ -160,7 +165,7 @@ func twitchChannelList(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "<h1>Online Users</h1>")
 	fmt.Fprintf(w, "<ul>")
 	for _, user := range onlineStreamers {
-		fmt.Fprintf(w, "<li style='margin-bottom: 5px; font-size: large'><button onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</button><p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+"</p><p style='margin-top: 0px'>"+user.Title+"</p></li>")
+		fmt.Fprintf(w, "<li style='margin-bottom: 5px; font-size: large'><img src=\""+user.ThumbnailURL+"\"><br><button onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</button><p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+" - Viewers: "+user.ViewerCount+"</p><p style='margin-top: 0px'>"+user.Title+"</p></li>")
 	}
 	fmt.Fprintf(w, "</ul>")
 	fmt.Fprintf(w, "</body></html>")
@@ -272,10 +277,15 @@ func fetchGames(client http.Client, onlineUsers OnlineUsersResponse) ([]OnlineSt
 	}
 
 	for _, user := range onlineUsers.Data {
+		thumbnailURL := strings.Replace(user.ThumbnailURL, "{width}", "320", -1)
+		thumbnailURL = strings.Replace(thumbnailURL, "{height}", "180", -1)
+
 		onlineStreamer := OnlineStreamer{
 			user.UserName,
 			gameIDToNameMap[user.GameID],
 			user.Title,
+			thumbnailURL,
+			strconv.Itoa(user.ViewerCount),
 		}
 		onlineStreamers = append(onlineStreamers, onlineStreamer)
 	}
