@@ -164,28 +164,33 @@ func twitchChannelList(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"static/style.css\"><link rel=\"icon\" type=\"image/x-icon\" href=\"/gui/static/favicon.ico\"/></head><body>")
 	fmt.Fprintf(w,
 		`<script>
+		  function manualCast(element) {
+				const streamer = document.getElementsByName("sname")[0].value
+				castStreamer(streamer, element)
+			}
 			function castStreamer(streamer, element) {
-				const Http = new XMLHttpRequest();
-				const url='/gui/cast/' + streamer;
-				Http.open("GET", url);
+				const http = new XMLHttpRequest()
+				const url='/gui/cast/' + streamer
+				http.open("GET", url)
 
-				element.classList.remove("loadFailure");
-				element.classList.remove("loadSuccess");
+				element.classList.remove("loadFailure")
+				element.classList.remove("loadSuccess")
 
-				Http.onreadystatechange = (e) => {
-					if (Http.readyState === 4 && Http.status === 200) {
-						if (JSON.parse(Http.responseText).success === true) {
-							element.classList.add("loadSuccess");
+				http.onreadystatechange = (e) => {
+					if (http.readyState === 4 && http.status === 200) {
+						if (JSON.parse(http.responseText).success === true) {
+							element.classList.add("loadSuccess")
 						}
 						else {
-							element.classList.add("loadFailure");
+							element.classList.add("loadFailure")
 						}
 					}
 				}											
-				Http.send();
+				http.send();
 			}
 		</script>`)
 	fmt.Fprintf(w, "<h1>Online Users</h1>")
+	fmt.Fprintf(w, "<input type=\"text\" name=\"sname\"><button onclick=\"manualCast(this);\">Manual Cast</button>")
 	fmt.Fprintf(w, "<ul>")
 	for _, user := range onlineStreamers {
 		fmt.Fprintf(w, "<li style='margin-bottom: 5px; font-size: large'><img src=\""+user.ThumbnailURL+"\"><br><button onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</button><p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+" - Viewers: <script>document.write(parseInt("+user.ViewerCount+").toLocaleString())</script></p><p style='margin-top: 0px'>"+user.Title+"</p></li>")
