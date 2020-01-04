@@ -14,7 +14,8 @@ import (
 	apikeys "twitch-caster/api-keys"
 )
 
-const CHROMECAST_IP = "192.168.86.92"
+const LR_CHROMECAST_IP = "192.168.86.92"
+const KITCHEN_CHROMECAST_IP = "192.168.86.57"
 
 const twitchUserID = "8095777"
 const followedStreamersURL = "https://api.twitch.tv/helix/users/follows?from_id=" + twitchUserID + "&first=100"
@@ -94,7 +95,8 @@ func main() {
 
 func castTwitch(w http.ResponseWriter, r *http.Request) {
 	var pathParams = strings.Split(r.URL.Path, "/")
-	var streamID = pathParams[len(pathParams)-1]
+	var ipAddress = pathParams[len(pathParams)-1]
+	var streamID = pathParams[len(pathParams)-2]
 
 	if streamID == "" {
 		fmt.Fprintf(w, "Invalid stream ID")
@@ -118,7 +120,7 @@ func castTwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	castCmd := exec.Command("cast", "--host", CHROMECAST_IP, "media", "play", streamLinkResponse.URL)
+	castCmd := exec.Command("cast", "--host", ipAddress, "media", "play", streamLinkResponse.URL)
 	_, castCommandError := castCmd.Output()
 
 	if castCommandError != nil {
@@ -170,7 +172,9 @@ func twitchChannelList(w http.ResponseWriter, r *http.Request) {
 			}
 			function castStreamer(streamer, element) {
 				const http = new XMLHttpRequest()
-				const url='/gui/cast/' + streamer
+				const dropDownElement = document.getElementById("device_selection")
+				const ip = dropDownElement.options[dropDownElement.selectedIndex].value
+				const url='/gui/cast/' + streamer + '/' + ip
 				http.open("GET", url)
 
 				element.classList.remove("loadFailure")
@@ -190,6 +194,7 @@ func twitchChannelList(w http.ResponseWriter, r *http.Request) {
 			}
 		</script>`)
 	fmt.Fprintf(w, "<h1>Online Users</h1>")
+	fmt.Fprintf(w, "<select id=\"device_selection\"><option value=\""+LR_CHROMECAST_IP+"\">Living Room</option><option value=\""+KITCHEN_CHROMECAST_IP+"\">Kitchen</option></select><br>")
 	fmt.Fprintf(w, "<input type=\"text\" name=\"sname\"><button onclick=\"manualCast(this);\">Manual Cast</button>")
 	fmt.Fprintf(w, "<ul>")
 	for _, user := range onlineStreamers {
