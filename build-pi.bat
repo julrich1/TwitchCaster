@@ -6,3 +6,4 @@ set GOOS=
 set GOARCH=
 set GOARM=
 scp -r twitch-caster static pi@raspberrypi:
+del twitch-caster
