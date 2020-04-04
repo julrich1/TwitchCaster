@@ -11,7 +11,8 @@ import (
 	"strconv"
 	"strings"
 
-	apikeys "twitch-caster/api-keys"
+	apiKeyProvider "twitch-caster/api-keys"
+	"twitch-caster/auth"
 )
 
 const LR_CHROMECAST_IP = "192.168.86.92"
@@ -205,10 +206,16 @@ func twitchChannelList(w http.ResponseWriter, r *http.Request) {
 }
 
 func fetchTwitchFollows(client http.Client) (TwitchFollowsResponse, error) {
-	req, _ := http.NewRequest("GET", followedStreamersURL, nil)
-	req.Header.Set("Client-ID", apikeys.TwitchAPIKey)
-
 	var twitchFollowersData TwitchFollowsResponse
+
+	token, authError := auth.GetToken()
+	if authError != nil {
+		return twitchFollowersData, errors.New("Auth token error") 
+	}
+
+	req, _ := http.NewRequest("GET", followedStreamersURL, nil)
+	req.Header.Set("Client-ID", apiKeyProvider.TwitchClientID())
+	req.Header.Set("Authorization", "Bearer " + token)
 
 	res, error := client.Do(req)
 	if error != nil {
@@ -232,10 +239,16 @@ func fetchTwitchFollows(client http.Client) (TwitchFollowsResponse, error) {
 }
 
 func fetchTwitchStreamersStatus(client http.Client, twitchFollowsResponse TwitchFollowsResponse) (OnlineUsersResponse, error) {
-	streamStatusRequest, error := http.NewRequest("GET", streamStatusURL, nil)
-	streamStatusRequest.Header.Set("Client-ID", apikeys.TwitchAPIKey)
-
 	var onlineUsersResponse OnlineUsersResponse
+
+	token, authError := auth.GetToken()
+	if authError != nil {
+		return onlineUsersResponse, errors.New("Auth token error") 
+	}
+
+	streamStatusRequest, error := http.NewRequest("GET", streamStatusURL, nil)
+	streamStatusRequest.Header.Set("Client-ID", apiKeyProvider.TwitchClientID())
+	streamStatusRequest.Header.Set("Authorization", "Bearer " + token)
 
 	q := streamStatusRequest.URL.Query()
 	q.Add("first", "100")
@@ -266,17 +279,23 @@ func fetchTwitchStreamersStatus(client http.Client, twitchFollowsResponse Twitch
 }
 
 func fetchGames(client http.Client, onlineUsers OnlineUsersResponse) ([]OnlineStreamer, error) {
+	var onlineStreamers []OnlineStreamer
+	var gamesResponse GamesResponse
+
 	gamesMap := make(map[string]bool)
 
 	for _, user := range onlineUsers.Data {
 		gamesMap[user.GameID] = true
 	}
 
-	gamesRequest, error := http.NewRequest("GET", gamesURL, nil)
-	gamesRequest.Header.Set("Client-ID", apikeys.TwitchAPIKey)
+	token, authError := auth.GetToken()
+	if authError != nil {
+		return onlineStreamers, errors.New("Auth token error") 
+	}
 
-	var onlineStreamers []OnlineStreamer
-	var gamesResponse GamesResponse
+	gamesRequest, error := http.NewRequest("GET", gamesURL, nil)
+	gamesRequest.Header.Set("Client-ID", apiKeyProvider.TwitchClientID())
+	gamesRequest.Header.Set("Authorization", "Bearer " + token)
 
 	query := gamesRequest.URL.Query()
 	query.Add("first", "100")
