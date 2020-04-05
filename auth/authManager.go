@@ -59,7 +59,9 @@ func GetToken() (string, error) {
 
 func isSavedTokenValid() bool {
 	if storedAuthResponse.AccessToken != "" && expiresTime.After(time.Now()) {
+		fmt.Println("Valid token")
 		return true
 	}
+	fmt.Println("Invalid token")
 	return false
 }
