@@ -12,14 +12,14 @@ const streamStatusURL = "https://api.twitch.tv/helix/streams"
 const gamesURL = "https://api.twitch.tv/helix/games"
 
 var endpoints = map[string]endpoint{
-	"TWITCH_FOLLOWERS": endpoint{ "GET", followedStreamersURL },
-	"TWITCH_STREAMERS_STATUS": endpoint{ "GET", streamStatusURL },
-	"TWITCH_GAMES": endpoint{ "GET", gamesURL },
+	"TWITCH_FOLLOWERS":        {"GET", followedStreamersURL},
+	"TWITCH_STREAMERS_STATUS": {"GET", streamStatusURL},
+	"TWITCH_GAMES":            {"GET", gamesURL},
 }
 
 type endpoint struct {
 	method string
-	url string
+	url    string
 }
 
 func FetchTwitchFollows() (models.TwitchFollowsResponse, error) {
@@ -33,9 +33,9 @@ func FetchTwitchFollows() (models.TwitchFollowsResponse, error) {
 		return twitchFollowersData, err
 	}
 
-	queryParameters := map[string][]string{ "from_id": {twitchUserID}, "first": {"100"} }
+	queryParameters := map[string][]string{"from_id": {twitchUserID}, "first": {"100"}}
 
-	request := Request{ endpoint.method, endpoint.url, headers, queryParameters }
+	request := Request{endpoint.method, endpoint.url, headers, queryParameters}
 	err = MakeRequest(request, &twitchFollowersData)
 
 	return twitchFollowersData, err
@@ -59,7 +59,7 @@ func FetchTwitchStreamersStatus(twitchFollowsResponse models.TwitchFollowsRespon
 		queryParameters["user_id"] = append(queryParameters["user_id"], element.ToID)
 	}
 
-	request := Request{ endpoint.method, endpoint.url, headers, queryParameters }
+	request := Request{endpoint.method, endpoint.url, headers, queryParameters}
 	err = MakeRequest(request, &onlineUsersResponse)
 
 	return onlineUsersResponse, err
@@ -88,7 +88,7 @@ func FetchGames(onlineUsers models.OnlineUsersResponse) ([]models.OnlineStreamer
 		queryParameters["id"] = append(queryParameters["id"], user.GameID)
 	}
 
-	request := Request{ endpoint.method, endpoint.url, headers, queryParameters }
+	request := Request{endpoint.method, endpoint.url, headers, queryParameters}
 	err = MakeRequest(request, &gamesResponse)
 
 	gameIDToNameMap := make(map[string]string)

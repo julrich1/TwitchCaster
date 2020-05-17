@@ -1,7 +1,9 @@
 package endpoints
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os/exec"
@@ -10,11 +12,33 @@ import (
 	"twitch-caster/services"
 )
 
-const LR_CHROMECAST_IP = "192.168.86.92"
-const KITCHEN_CHROMECAST_IP = "192.168.86.57"
+const livingRoomChromecastIP = "192.168.86.92"
+const kitchenChromecastIP = "192.168.86.57"
 
-type streamLinkResponse struct {
-	URL string `json:"url"`
+func createKeyValuePairs(m map[string]streamLinkStreamInfo) string {
+	b := new(bytes.Buffer)
+	for key, value := range m {
+		fmt.Fprintf(b, "%s=\"%s\"\n", key, value)
+	}
+	return b.String()
+}
+
+// Response object when quality is not specified
+type streamLinkFullResponse struct {
+	Streams map[string]streamLinkStreamInfo `json:"streams"`
+	Plugin  string                          `json:"plugin"`
+}
+
+type streamLinkStreamInfo struct {
+	Type    string `json:"type"`
+	URL     string `json:"url"`
+	Headers struct {
+		UserAgent      string `json:"User-Agent"`
+		AcceptEncoding string `json:"Accept-Encoding"`
+		Accept         string `json:"Accept"`
+		Connection     string `json:"Connection"`
+		ClientID       string `json:"Client-ID"`
+	} `json:"headers"`
 }
 
 type castJSONResponse struct {
@@ -30,25 +54,20 @@ func CastTwitch(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Invalid stream ID")
 		return
 	}
-	streamLinkCmd := exec.Command("streamlink", "twitch.tv/"+streamID, "best", "--http-header=Client-ID=jzkbprff40iqj646a697cyrvl0zt2m6", "--player-passthrough=http,hls,rtmp", "-j")
-	output, streamLinkError := streamLinkCmd.Output()
 
-	if streamLinkError != nil {
-		fmt.Println(streamLinkError)
+	bestQuality := false
+	if ipAddress == livingRoomChromecastIP {
+		bestQuality = true
+	}
+
+	streamURL, err := fetchQuality(streamID, bestQuality)
+	if err != nil {
+		fmt.Println(err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	var streamLinkResponse streamLinkResponse
-	jsonError := json.Unmarshal(output, &streamLinkResponse)
-
-	if jsonError != nil {
-		fmt.Println(jsonError)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	castCmd := exec.Command("cast", "--host", ipAddress, "media", "play", streamLinkResponse.URL)
+	castCmd := exec.Command("cast", "--host", ipAddress, "media", "play", streamURL)
 	_, castCommandError := castCmd.Output()
 
 	if castCommandError != nil {
@@ -67,6 +86,43 @@ func CastTwitch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(jsonResponse)
+}
+
+func fetchQuality(streamID string, bestQuality bool) (string, error) {
+	streamLinkCmd := exec.Command("streamlink", "twitch.tv/"+streamID, "--http-header=Client-ID=jzkbprff40iqj646a697cyrvl0zt2m6", "--player-passthrough=http,hls,rtmp", "-j")
+	output, streamLinkError := streamLinkCmd.Output()
+
+	if streamLinkError != nil {
+		return "", streamLinkError
+	}
+
+	var streamLinkResponse streamLinkFullResponse
+	jsonError := json.Unmarshal(output, &streamLinkResponse)
+	if jsonError != nil {
+		return "", jsonError
+	}
+
+	if bestQuality {
+		stream, ok := streamLinkResponse.Streams["best"]
+		if !ok {
+			return "", errors.New("Error fetching best quality stream")
+		}
+		fmt.Println("Sending best quality stream")
+		return stream.URL, nil
+	}
+
+	// Not using best quality so find the next level down
+	stream, ok := streamLinkResponse.Streams["720p"]
+	if !ok {
+		stream, ok := streamLinkResponse.Streams["480p"]
+		if !ok {
+			return "", errors.New("Could not find a lower quality stream")
+		}
+		println("Sending 480 stream")
+		return stream.URL, nil
+	}
+	println("Sending 720 stream")
+	return stream.URL, nil
 }
 
 func TwitchChannelList(w http.ResponseWriter, r *http.Request) {
@@ -123,7 +179,7 @@ func TwitchChannelList(w http.ResponseWriter, r *http.Request) {
 			}
 		</script>`)
 	fmt.Fprintf(w, "%s", "<h1>Online Users</h1>")
-	fmt.Fprintf(w, "%s", "<select id=\"device_selection\"><option value=\""+LR_CHROMECAST_IP+"\">Living Room</option><option value=\""+KITCHEN_CHROMECAST_IP+"\">Kitchen</option></select><br>")
+	fmt.Fprintf(w, "%s", "<select id=\"device_selection\"><option value=\""+livingRoomChromecastIP+"\">Living Room</option><option value=\""+kitchenChromecastIP+"\">Kitchen</option></select><br>")
 	fmt.Fprintf(w, "%s", "<input type=\"text\" name=\"sname\"><button onclick=\"manualCast(this);\">Manual Cast</button>")
 	fmt.Fprintf(w, "%s", "<ul>")
 	for _, user := range onlineStreamers {
