@@ -118,10 +118,10 @@ func fetchQuality(streamID string, bestQuality bool) (string, error) {
 		if !ok {
 			return "", errors.New("Could not find a lower quality stream")
 		}
-		println("Sending 480 stream")
+		fmt.Println("Sending 480 stream")
 		return stream.URL, nil
 	}
-	println("Sending 720 stream")
+	fmt.Println("Sending 720 stream")
 	return stream.URL, nil
 }
 
