@@ -1,18 +1,19 @@
 package services
 
 import (
-	"net/http"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
-	"encoding/json"
+	"net/http"
+	"strconv"
 )
 
 type Request struct {
-	method string
-	url string
-	headers map[string]string
+	method          string
+	url             string
+	headers         map[string]string
 	queryParameters map[string][]string
 }
 
@@ -34,7 +35,6 @@ func MakeRequest(request Request, responseObject interface{}) error {
 	req.URL.RawQuery = queryParams.Encode()
 
 	res, error := client.Do(req)
-
 	defer res.Body.Close()
 
 	if error != nil {
@@ -45,6 +45,10 @@ func MakeRequest(request Request, responseObject interface{}) error {
 	body, error := ioutil.ReadAll(res.Body)
 	if error != nil {
 		return errors.New("Error reading response")
+	}
+
+	if res.StatusCode != 200 {
+		return errors.New("Error making request, got status code " + strconv.Itoa(res.StatusCode) + " " + string(body))
 	}
 
 	err := json.Unmarshal(body, &responseObject)

@@ -140,8 +140,8 @@ func TwitchChannelList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	onlineStreamers, gamesError := services.FetchGames(onlineUsersResponse)
-	if gamesError != nil {
+	onlineStreamers, error := services.FetchGames(onlineUsersResponse)
+	if error != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Println(error)
 		return
@@ -181,10 +181,29 @@ func TwitchChannelList(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "%s", "<h1>Online Users</h1>")
 	fmt.Fprintf(w, "%s", "<select id=\"device_selection\"><option value=\""+livingRoomChromecastIP+"\">Living Room</option><option value=\""+kitchenChromecastIP+"\">Kitchen</option></select><br>")
 	fmt.Fprintf(w, "%s", "<input type=\"text\" name=\"sname\"><button onclick=\"manualCast(this);\">Manual Cast</button>")
-	fmt.Fprintf(w, "%s", "<ul>")
+	fmt.Fprintf(w, "%s", "<div class='container'>")
 	for _, user := range onlineStreamers {
-		fmt.Fprintf(w, "%s", "<li style='margin-bottom: 5px; font-size: large'><img src=\""+user.ThumbnailURL+"\"><br><button onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</button><p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+" - Viewers: <script>document.write(parseInt("+user.ViewerCount+").toLocaleString())</script></p><p style='margin-top: 0px'>"+user.Title+"</p></li>")
+		fmt.Fprintf(w, "%s",
+			"<div class='streamContainer'>"+
+				"<div onclick=\"castStreamer('"+user.Name+"', this);\" class='thumbnailContainer'>"+
+				"<img src=\""+user.ThumbnailURL+"\" class='thumbnailImage'>"+
+				"<div class='viewerCountContainer'><div class='viewerCount'><script>document.write(parseInt("+user.ViewerCount+").toLocaleString()+' viewers')</script></div></div>"+
+				"</div>"+
+				"<div class='streamDetailsContainer'>"+
+				"<div class='profileImageContainer'>"+
+				"<img src=\""+user.ProfileImageURL+"\" class='profileImage'>"+
+				"</div>"+
+				"<div class='textContainer'>"+
+				// "<button onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</button>"+
+				"<h3>"+user.Title+"</h3>"+
+				"<h4>"+user.Name+"</h4>"+
+				"<h4>"+user.Game+"</h4>"+
+				"</div>"+
+				// "<p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+" - Viewers: <script>document.write(parseInt("+user.ViewerCount+").toLocaleString())</script></p>"+
+				// "<p style='margin-top: 0px'>"+user.Title+"</p>"+
+				"</div>"+
+				"</div>")
 	}
-	fmt.Fprintf(w, "%s", "</ul>")
+	fmt.Fprintf(w, "%s", "</div>")
 	fmt.Fprintf(w, "%s", "</body></html>")
 }
