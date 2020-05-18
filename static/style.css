@@ -41,6 +41,11 @@
 
 .thumbnailImage {
   width: 100%;
+  border: 0px solid white;
+}
+
+.thumbnailImage:active {
+  border-width: 3px;
 }
 
 .container {

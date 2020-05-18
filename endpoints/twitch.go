@@ -194,13 +194,10 @@ func TwitchChannelList(w http.ResponseWriter, r *http.Request) {
 				"<img src=\""+user.ProfileImageURL+"\" class='profileImage'>"+
 				"</div>"+
 				"<div class='textContainer'>"+
-				// "<button onclick=\"castStreamer('"+user.Name+"', this);\">"+user.Name+"</button>"+
 				"<h3>"+user.Title+"</h3>"+
 				"<h4>"+user.Name+"</h4>"+
 				"<h4>"+user.Game+"</h4>"+
 				"</div>"+
-				// "<p style='margin-bottom: 0px; margin-top: 0px'>"+user.Game+" - Viewers: <script>document.write(parseInt("+user.ViewerCount+").toLocaleString())</script></p>"+
-				// "<p style='margin-top: 0px'>"+user.Title+"</p>"+
 				"</div>"+
 				"</div>")
 	}
