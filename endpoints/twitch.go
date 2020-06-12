@@ -178,9 +178,9 @@ func TwitchChannelList(w http.ResponseWriter, r *http.Request) {
 				http.send();
 			}
 		</script>`)
-	fmt.Fprintf(w, "%s", "<h1>Online Users</h1>")
+	fmt.Fprintf(w, "%s", "<div class=\"logoContainer\"><img class=\"logo\" src=\"/gui/static/twitch-logo.png\"></div>")
 	fmt.Fprintf(w, "%s", "<select id=\"device_selection\"><option value=\""+livingRoomChromecastIP+"\">Living Room</option><option value=\""+kitchenChromecastIP+"\">Kitchen</option></select><br>")
-	fmt.Fprintf(w, "%s", "<input type=\"text\" name=\"sname\"><button onclick=\"manualCast(this);\">Manual Cast</button>")
+	fmt.Fprintf(w, "%s", "<div class=\"manualContainer\"><input type=\"text\" name=\"sname\"><button onclick=\"manualCast(this);\">Manual Cast</button></div>")
 	fmt.Fprintf(w, "%s", "<div class='container'>")
 	for _, user := range onlineStreamers {
 		fmt.Fprintf(w, "%s",
