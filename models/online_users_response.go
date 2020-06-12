@@ -5,6 +5,7 @@ import (
 	"strings"
 )
 
+// OnlineUsersResponse is the object that twitch responds with when querying for who is actively online
 type OnlineUsersResponse struct {
 	Data []struct {
 		UserID       string `json:"user_id"`
@@ -16,6 +17,7 @@ type OnlineUsersResponse struct {
 	} `json:"data"`
 }
 
+// MakeOnlineStreamers converts an OnlineUsersResponse object into an array of OnlineStreamers object
 func (onlineUsersResponse OnlineUsersResponse) MakeOnlineStreamers(gameIDToNameMap map[string]string, streamerIDToThumbnailMap map[string]string) []OnlineStreamer {
 	onlineStreamers := make([]OnlineStreamer, 0, len(onlineUsersResponse.Data))
 	for _, user := range onlineUsersResponse.Data {

@@ -1,31 +1,44 @@
 package auth
 
 import (
-	"net/http"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
-	"errors"
-	"encoding/json"
 	"log"
+	"net/http"
 	"time"
 
-	"twitch-caster/api-keys"
+	"twitch-caster/models"
 )
 
 type authResponse struct {
-	AccessToken string `json:"access_token"`
-	ExpiresIn time.Duration `json:"expires_in"`
+	AccessToken string        `json:"access_token"`
+	ExpiresIn   time.Duration `json:"expires_in"`
 }
 
 var storedAuthResponse authResponse
 var expiresTime time.Time
 
-func GetToken() (string, error) {
+// Manager handles authentication for Twitch endpoints
+type Manager struct {
+	settings models.Settings
+}
+
+// NewManager creates a new Manager object
+func NewManager(settings models.Settings) *Manager {
+	manager := Manager{}
+	manager.settings = settings
+	return &manager
+}
+
+// GetToken fetches a new bearer token used to make Twitch API requests
+func (a *Manager) GetToken() (string, error) {
 	if isSavedTokenValid() {
 		return storedAuthResponse.AccessToken, nil
 	}
 
-	authURL := "https://id.twitch.tv/oauth2/token?client_id=" + apikeys.TwitchClientID() + "&client_secret=" + apikeys.TwitchSecret() + "&grant_type=client_credentials"
+	authURL := "https://id.twitch.tv/oauth2/token?client_id=" + a.settings.TwitchClientID + "&client_secret=" + a.settings.TwitchSecret + "&grant_type=client_credentials"
 	req, _ := http.NewRequest("POST", authURL, nil)
 
 	var authResponse authResponse

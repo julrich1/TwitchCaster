@@ -10,6 +10,7 @@ import (
 	"strconv"
 )
 
+// Request is a generic struct that contains information about how to make a network request
 type Request struct {
 	method          string
 	url             string
@@ -19,6 +20,7 @@ type Request struct {
 
 var client = http.Client{}
 
+// MakeRequest makes a network request and unmarshalls the data
 func MakeRequest(request Request, responseObject interface{}) error {
 
 	req, _ := http.NewRequest(request.method, request.url, nil)
@@ -35,12 +37,11 @@ func MakeRequest(request Request, responseObject interface{}) error {
 	req.URL.RawQuery = queryParams.Encode()
 
 	res, error := client.Do(req)
-	defer res.Body.Close()
-
 	if error != nil {
 		fmt.Println(error)
 		return error
 	}
+	defer res.Body.Close()
 
 	body, error := ioutil.ReadAll(res.Body)
 	if error != nil {

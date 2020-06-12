@@ -1,12 +1,10 @@
 package services
 
 import (
-	apiKeyProvider "twitch-caster/api-keys"
 	"twitch-caster/auth"
 	"twitch-caster/models"
 )
 
-const twitchUserID = "8095777"
 const followedStreamersURL = "https://api.twitch.tv/helix/users/follows"
 const streamStatusURL = "https://api.twitch.tv/helix/streams"
 const gamesURL = "https://api.twitch.tv/helix/games"
@@ -24,18 +22,33 @@ type endpoint struct {
 	url    string
 }
 
-func FetchTwitchFollows() (models.TwitchFollowsResponse, error) {
+// TwitchService is a struct that has methods related to making Twitch API requests
+type TwitchService struct {
+	settings    models.Settings
+	authManager *auth.Manager
+}
+
+// NewTwitchService creates a new TwitchService object
+func NewTwitchService(settings models.Settings) *TwitchService {
+	twitchService := TwitchService{}
+	twitchService.settings = settings
+	twitchService.authManager = auth.NewManager(settings)
+	return &twitchService
+}
+
+// FetchTwitchFollows fetches the followed streamers for a Twitch user
+func (t *TwitchService) FetchTwitchFollows() (models.TwitchFollowsResponse, error) {
 	var twitchFollowersData models.TwitchFollowsResponse
 	var endpoint = endpoints["TWITCH_FOLLOWERS"]
 
 	headers := map[string]string{}
-	appendCommonHeaders(headers)
-	err := appendTwitchAuthHeader(headers)
+	t.appendCommonHeaders(headers)
+	err := t.appendTwitchAuthHeader(headers)
 	if err != nil {
 		return twitchFollowersData, err
 	}
 
-	queryParameters := map[string][]string{"from_id": {twitchUserID}, "first": {"100"}}
+	queryParameters := map[string][]string{"from_id": {t.settings.UserID}, "first": {"100"}}
 
 	request := Request{endpoint.method, endpoint.url, headers, queryParameters}
 	err = MakeRequest(request, &twitchFollowersData)
@@ -43,13 +56,14 @@ func FetchTwitchFollows() (models.TwitchFollowsResponse, error) {
 	return twitchFollowersData, err
 }
 
-func FetchTwitchStreamersStatus(twitchFollowsResponse models.TwitchFollowsResponse) (models.OnlineUsersResponse, error) {
+// FetchTwitchStreamersStatus calls the Twitch API to get additional information about streamers
+func (t *TwitchService) FetchTwitchStreamersStatus(twitchFollowsResponse models.TwitchFollowsResponse) (models.OnlineUsersResponse, error) {
 	var onlineUsersResponse models.OnlineUsersResponse
 	var endpoint = endpoints["TWITCH_STREAMERS_STATUS"]
 
 	headers := map[string]string{}
-	appendCommonHeaders(headers)
-	err := appendTwitchAuthHeader(headers)
+	t.appendCommonHeaders(headers)
+	err := t.appendTwitchAuthHeader(headers)
 	if err != nil {
 		return onlineUsersResponse, err
 	}
@@ -67,13 +81,14 @@ func FetchTwitchStreamersStatus(twitchFollowsResponse models.TwitchFollowsRespon
 	return onlineUsersResponse, err
 }
 
-func FetchGames(onlineUsers models.OnlineUsersResponse) ([]models.OnlineStreamer, error) {
+// FetchGames calls the Twitch API to get information on games
+func (t *TwitchService) FetchGames(onlineUsers models.OnlineUsersResponse) ([]models.OnlineStreamer, error) {
 	var gamesResponse models.GamesResponse
 	var endpoint = endpoints["TWITCH_GAMES"]
 
 	headers := map[string]string{}
-	appendCommonHeaders(headers)
-	err := appendTwitchAuthHeader(headers)
+	t.appendCommonHeaders(headers)
+	err := t.appendTwitchAuthHeader(headers)
 	if err != nil {
 		return []models.OnlineStreamer{}, err
 	}
@@ -96,7 +111,7 @@ func FetchGames(onlineUsers models.OnlineUsersResponse) ([]models.OnlineStreamer
 		return []models.OnlineStreamer{}, err
 	}
 
-	usersResponse, err := FetchUsers(onlineUsers)
+	usersResponse, err := t.FetchUsers(onlineUsers)
 	if err != nil {
 		return []models.OnlineStreamer{}, err
 	}
@@ -114,13 +129,14 @@ func FetchGames(onlineUsers models.OnlineUsersResponse) ([]models.OnlineStreamer
 	return onlineUsers.MakeOnlineStreamers(gameIDToNameMap, streamerIDToThumbnailMap), nil
 }
 
-func FetchUsers(onlineUsers models.OnlineUsersResponse) (models.UsersResponse, error) {
+// FetchUsers calls the Twitch API to get detailed user information
+func (t *TwitchService) FetchUsers(onlineUsers models.OnlineUsersResponse) (models.UsersResponse, error) {
 	var usersResponse models.UsersResponse
 	var endpoint = endpoints["TWITCH_USERS"]
 
 	headers := map[string]string{}
-	appendCommonHeaders(headers)
-	err := appendTwitchAuthHeader(headers)
+	t.appendCommonHeaders(headers)
+	err := t.appendTwitchAuthHeader(headers)
 	if err != nil {
 		return usersResponse, err
 	}
@@ -141,14 +157,14 @@ func FetchUsers(onlineUsers models.OnlineUsersResponse) (models.UsersResponse, e
 	return usersResponse, nil
 }
 
-func appendTwitchAuthHeader(headers map[string]string) error {
-	token, authError := auth.GetToken()
+func (t *TwitchService) appendTwitchAuthHeader(headers map[string]string) error {
+	token, authError := t.authManager.GetToken()
 	if authError == nil {
 		headers["Authorization"] = "Bearer " + token
 	}
 	return authError
 }
 
-func appendCommonHeaders(headers map[string]string) {
-	headers["Client-ID"] = apiKeyProvider.TwitchClientID()
+func (t *TwitchService) appendCommonHeaders(headers map[string]string) {
+	headers["Client-ID"] = t.settings.TwitchClientID
 }

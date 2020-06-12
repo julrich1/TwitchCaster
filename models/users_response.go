@@ -1,5 +1,6 @@
 package models
 
+// UsersResponse is the response model for Twitch profile information requests
 type UsersResponse struct {
 	Data []struct {
 		ID              string `json:"id"`
@@ -11,5 +12,5 @@ type UsersResponse struct {
 		OfflineImageURL string `json:"offline_image_url"`
 		ViewCount       int    `json:"view_count"`
 		Email           string `json:"email"`
-	} `json:data`
+	} `json:"data"`
 }

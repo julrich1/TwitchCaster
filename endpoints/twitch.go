@@ -9,11 +9,9 @@ import (
 	"os/exec"
 	"strings"
 
+	"twitch-caster/models"
 	"twitch-caster/services"
 )
-
-const livingRoomChromecastIP = "192.168.86.92"
-const kitchenChromecastIP = "192.168.86.57"
 
 func createKeyValuePairs(m map[string]streamLinkStreamInfo) string {
 	b := new(bytes.Buffer)
@@ -45,7 +43,20 @@ type castJSONResponse struct {
 	Success bool `json:"success"`
 }
 
-func CastTwitch(w http.ResponseWriter, r *http.Request) {
+// TwitchEndpoint contains the endpoints for handling casting and listing the main GUI
+type TwitchEndpoint struct {
+	chromecasts   []models.Chromecast
+	twitchService *services.TwitchService
+}
+
+func NewTwitchEndpoint(config models.Configuration) *TwitchEndpoint {
+	twitchEndpoint := TwitchEndpoint{}
+	twitchEndpoint.chromecasts = config.Chromecasts
+	twitchEndpoint.twitchService = services.NewTwitchService(config.Settings)
+	return &twitchEndpoint
+}
+
+func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 	var pathParams = strings.Split(r.URL.Path, "/")
 	var ipAddress = pathParams[len(pathParams)-1]
 	var streamID = pathParams[len(pathParams)-2]
@@ -55,12 +66,20 @@ func CastTwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bestQuality := false
-	if ipAddress == livingRoomChromecastIP {
-		bestQuality = true
+	var quality string
+	for _, chromecast := range t.chromecasts {
+		if chromecast.IPAddress == ipAddress {
+			quality = chromecast.QualityMax
+		}
 	}
 
-	streamURL, err := fetchQuality(streamID, bestQuality)
+	if quality == "" {
+		fmt.Println("Error: Chromecast IP Address not found")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	streamURL, err := t.fetchQuality(streamID, quality)
 	if err != nil {
 		fmt.Println(err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -88,7 +107,7 @@ func CastTwitch(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonResponse)
 }
 
-func fetchQuality(streamID string, bestQuality bool) (string, error) {
+func (t *TwitchEndpoint) fetchQuality(streamID string, quality string) (string, error) {
 	streamLinkCmd := exec.Command("streamlink", "twitch.tv/"+streamID, "--http-header=Client-ID=jzkbprff40iqj646a697cyrvl0zt2m6", "--player-passthrough=http,hls,rtmp", "-j")
 	output, streamLinkError := streamLinkCmd.Output()
 
@@ -102,45 +121,35 @@ func fetchQuality(streamID string, bestQuality bool) (string, error) {
 		return "", jsonError
 	}
 
-	if bestQuality {
-		stream, ok := streamLinkResponse.Streams["best"]
-		if !ok {
-			return "", errors.New("Error fetching best quality stream")
-		}
-		fmt.Println("Sending best quality stream")
-		return stream.URL, nil
-	}
-
-	// Not using best quality so find the next level down
-	stream, ok := streamLinkResponse.Streams["720p"]
+	var stream streamLinkStreamInfo
+	var ok bool
+	stream, ok = streamLinkResponse.Streams[quality]
 	if !ok {
-		stream, ok := streamLinkResponse.Streams["480p"]
+		// Couldn't find the requested quality - falling back
+		stream, ok = streamLinkResponse.Streams["480p"]
 		if !ok {
 			return "", errors.New("Could not find a lower quality stream")
 		}
-		fmt.Println("Sending 480 stream")
-		return stream.URL, nil
 	}
-	fmt.Println("Sending 720 stream")
 	return stream.URL, nil
 }
 
-func TwitchChannelList(w http.ResponseWriter, r *http.Request) {
-	twitchFollowsResponse, error := services.FetchTwitchFollows()
+func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Request) {
+	twitchFollowsResponse, error := t.twitchService.FetchTwitchFollows()
 	if error != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Println(error)
 		return
 	}
 
-	onlineUsersResponse, error := services.FetchTwitchStreamersStatus(twitchFollowsResponse)
+	onlineUsersResponse, error := t.twitchService.FetchTwitchStreamersStatus(twitchFollowsResponse)
 	if error != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Println(error)
 		return
 	}
 
-	onlineStreamers, error := services.FetchGames(onlineUsersResponse)
+	onlineStreamers, error := t.twitchService.FetchGames(onlineUsersResponse)
 	if error != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Println(error)
@@ -179,7 +188,13 @@ func TwitchChannelList(w http.ResponseWriter, r *http.Request) {
 			}
 		</script>`)
 	fmt.Fprintf(w, "%s", "<div class=\"logoContainer\"><img class=\"logo\" src=\"/gui/static/twitch-logo.png\"></div>")
-	fmt.Fprintf(w, "%s", "<select id=\"device_selection\"><option value=\""+livingRoomChromecastIP+"\">Living Room</option><option value=\""+kitchenChromecastIP+"\">Kitchen</option></select><br>")
+
+	fmt.Fprintf(w, "%s", "<select id=\"device_selection\">")
+	for _, chromecast := range t.chromecasts {
+		fmt.Fprintf(w, "<option value=\""+chromecast.IPAddress+"\">"+chromecast.Name+"</option>")
+	}
+	fmt.Fprintf(w, "</select><br>")
+
 	fmt.Fprintf(w, "%s", "<div class=\"manualContainer\"><input type=\"text\" name=\"sname\"><button onclick=\"manualCast(this);\">Manual Cast</button></div>")
 	fmt.Fprintf(w, "%s", "<div class='container'>")
 	for _, user := range onlineStreamers {

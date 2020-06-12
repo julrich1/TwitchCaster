@@ -1,0 +1,19 @@
+{
+    "settings": {
+        "userId": "123456",
+        "twitchClientId": "xxx",
+        "twitchSecret": "xxx"
+    },
+    "chromecasts": [
+        { 
+            "name": "Living Room",
+            "ipAddress": "192.168.1.1",
+            "qualityMax": "best"
+        },
+        {
+            "name": "Kitchen",
+            "ipAddress": "192.168.1.2",
+            "qualityMax": "720p"
+        }
+    ]
+}
