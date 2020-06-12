@@ -49,6 +49,7 @@ type TwitchEndpoint struct {
 	twitchService *services.TwitchService
 }
 
+// NewTwitchEndpoint creates a new TwitchEndpoint object
 func NewTwitchEndpoint(config models.Configuration) *TwitchEndpoint {
 	twitchEndpoint := TwitchEndpoint{}
 	twitchEndpoint.chromecasts = config.Chromecasts
@@ -56,6 +57,7 @@ func NewTwitchEndpoint(config models.Configuration) *TwitchEndpoint {
 	return &twitchEndpoint
 }
 
+// CastTwitch is the entry point for a cast twitch HTTP request
 func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 	var pathParams = strings.Split(r.URL.Path, "/")
 	var ipAddress = pathParams[len(pathParams)-1]
@@ -134,6 +136,7 @@ func (t *TwitchEndpoint) fetchQuality(streamID string, quality string) (string, 
 	return stream.URL, nil
 }
 
+// TwitchChannelList is the entry point for an HTTP channel list request
 func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Request) {
 	twitchFollowsResponse, error := t.twitchService.FetchTwitchFollows()
 	if error != nil {
