@@ -54,7 +54,7 @@ func MakeRequest(request Request, responseObject interface{}) error {
 
 	err := json.Unmarshal(body, &responseObject)
 	if err != nil {
-		log.Fatalln(err)
+		log.Println("Error parsing JSON from network request: ", err)
 		return errors.New("Error parsing JSON")
 	}
 	return nil

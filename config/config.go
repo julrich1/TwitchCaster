@@ -12,6 +12,8 @@ import (
 )
 
 const configFileName = "configuration.json"
+const defaultChannelListURL = "/gui/twitch-channel-list"
+const defaultCastURL = "/gui/cast/"
 
 // Load is used to load the configuration file from disk
 func Load() models.Configuration {
@@ -32,15 +34,23 @@ func Load() models.Configuration {
 		log.Fatalln("Error parsing configuration JSON: ", jsonError)
 	}
 
-	validateConfig(config)
+	validateConfig(&config)
 	return config
 }
 
-func validateConfig(config models.Configuration) {
+func validateConfig(config *models.Configuration) {
 	if config.Settings.UserID == "" ||
 		config.Settings.TwitchClientID == "" ||
 		config.Settings.TwitchSecret == "" {
 		log.Fatalln("Error in " + configFileName + ", missing required settings")
+	}
+
+	if config.Settings.ChannelListURL == "" {
+		config.Settings.ChannelListURL = defaultChannelListURL
+	}
+
+	if config.Settings.CastURL == "" {
+		config.Settings.CastURL = defaultCastURL
 	}
 
 	if len(config.Chromecasts) == 0 {

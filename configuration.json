@@ -3,6 +3,8 @@
         "userId": "123456",
         "twitchClientId": "xxx",
         "twitchSecret": "xxx"
+        "channelListURL": "/gui/twitch-channel-list",
+        "castURL": "/gui/cast/"
     },
     "chromecasts": [
         { 

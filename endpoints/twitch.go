@@ -160,7 +160,7 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, "%s", "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"static/style.css\"><link rel=\"icon\" type=\"image/x-icon\" href=\"/gui/static/favicon.ico\"/></head><body>")
+	fmt.Fprintf(w, "%s", "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"static/style.css\"><link rel=\"icon\" type=\"image/x-icon\" href=\"/static/favicon.ico\"/></head><body>")
 	fmt.Fprintf(w, "%s",
 		`<script>
 		  function manualCast(element) {
@@ -174,23 +174,16 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 				const url='/gui/cast/' + streamer + '/' + ip
 				http.open("GET", url)
 
-				element.classList.remove("loadFailure")
-				element.classList.remove("loadSuccess")
-
 				http.onreadystatechange = (e) => {
 					if (http.readyState === 4 && http.status === 200) {
 						if (JSON.parse(http.responseText).success === true) {
-							element.classList.add("loadSuccess")
-						}
-						else {
-							element.classList.add("loadFailure")
 						}
 					}
 				}											
 				http.send();
 			}
 		</script>`)
-	fmt.Fprintf(w, "%s", "<div class=\"logoContainer\"><img class=\"logo\" src=\"/gui/static/twitch-logo.png\"></div>")
+	fmt.Fprintf(w, "%s", "<div class=\"logoContainer\"><img class=\"logo\" src=\"/static/twitch-logo.png\"></div>")
 
 	fmt.Fprintf(w, "%s", "<select id=\"device_selection\">")
 	for _, chromecast := range t.chromecasts {

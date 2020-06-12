@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"net/http"
 
 	"twitch-caster/config"
@@ -12,8 +13,8 @@ func main() {
 
 	twitchEndpoint := endpoints.NewTwitchEndpoint(config)
 
-	http.Handle("/gui/static/", http.StripPrefix("/gui/static/", http.FileServer(http.Dir("static"))))
-	http.HandleFunc("/gui/twitch-channel-list", twitchEndpoint.TwitchChannelList)
-	http.HandleFunc("/gui/cast/", twitchEndpoint.CastTwitch)
-	http.ListenAndServe(":3010", nil)
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+	http.HandleFunc(config.Settings.ChannelListURL, twitchEndpoint.TwitchChannelList)
+	http.HandleFunc(config.Settings.CastURL, twitchEndpoint.CastTwitch)
+	log.Fatal(http.ListenAndServe(":3010", nil))
 }

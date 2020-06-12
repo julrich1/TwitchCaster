@@ -11,6 +11,8 @@ type Settings struct {
 	UserID         string `json:"userId"`
 	TwitchClientID string `json:"twitchClientId"`
 	TwitchSecret   string `json:"twitchSecret"`
+	ChannelListURL string `json:"channelListURL"`
+	CastURL        string `json:"castURL"`
 }
 
 // Chromecast objects that are cast targets

@@ -60,7 +60,7 @@ func (a *Manager) GetToken() (string, error) {
 
 	err := json.Unmarshal(body, &authResponse)
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalln("Error parsing the auth JSON response: ", err)
 		return "", errors.New("Error parsing auth response JSON")
 	}
 
