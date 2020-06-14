@@ -73,30 +73,24 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	streamURL, err := t.fetchStream(streamID, quality)
-	if err != nil {
-		fmt.Println("Error fetching stream: ", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	err = cast.URL(streamURL, ipAddress)
-	if err != nil {
-		fmt.Println("Error casting stream: ", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	castJSONResponse := castJSONResponse{true}
-	jsonResponse, err := json.Marshal(castJSONResponse)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(jsonResponse)
+
+	go func() {
+		streamURL, err := t.fetchStream(streamID, quality)
+		if err != nil {
+			fmt.Println("Error fetching stream: ", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		err = cast.URL(streamURL, ipAddress)
+		if err != nil {
+			fmt.Println("Error casting stream: ", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	}()
 }
 
 func (t *TwitchEndpoint) fetchStream(streamID string, quality string) (string, error) {
@@ -166,8 +160,6 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 
 				http.onreadystatechange = (e) => {
 					if (http.readyState === 4 && http.status === 200) {
-						if (JSON.parse(http.responseText).success === true) {
-						}
 					}
 				}											
 				http.send();
