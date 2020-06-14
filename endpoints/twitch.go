@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"twitch-caster/cast"
 	"twitch-caster/models"
 	"twitch-caster/services"
 )
@@ -76,7 +77,7 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if quality == "" {
-		fmt.Println("Error: Chromecast IP Address not found")
+		fmt.Println("Error: Could not determine quality setting for the selected Chromecast device")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -88,11 +89,9 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	castCmd := exec.Command("cast", "--host", ipAddress, "media", "play", streamURL)
-	_, castCommandError := castCmd.Output()
-
-	if castCommandError != nil {
-		fmt.Println("Error casting stream: ", castCommandError)
+	err = cast.URL(streamURL, ipAddress)
+	if err != nil {
+		fmt.Println("Error casting stream: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
