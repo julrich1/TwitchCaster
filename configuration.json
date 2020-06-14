@@ -2,7 +2,7 @@
     "settings": {
         "userId": "123456",
         "twitchClientId": "xxx",
-        "twitchSecret": "xxx"
+        "twitchSecret": "xxx",
         "channelListURL": "/gui/twitch-channel-list",
         "castURL": "/gui/cast/"
     },

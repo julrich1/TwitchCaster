@@ -1,7 +1,6 @@
 package endpoints
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,14 +12,6 @@ import (
 	"twitch-caster/models"
 	"twitch-caster/services"
 )
-
-func createKeyValuePairs(m map[string]streamLinkStreamInfo) string {
-	b := new(bytes.Buffer)
-	for key, value := range m {
-		fmt.Fprintf(b, "%s=\"%s\"\n", key, value)
-	}
-	return b.String()
-}
 
 // Response object when quality is not specified
 type streamLinkFullResponse struct {
