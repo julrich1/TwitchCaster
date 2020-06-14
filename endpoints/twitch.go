@@ -81,9 +81,9 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	streamURL, err := t.fetchQuality(streamID, quality)
+	streamURL, err := t.fetchStream(streamID, quality)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("Error fetching stream: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -92,7 +92,7 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 	_, castCommandError := castCmd.Output()
 
 	if castCommandError != nil {
-		fmt.Println(castCommandError)
+		fmt.Println("Error casting stream: ", castCommandError)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -109,7 +109,7 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonResponse)
 }
 
-func (t *TwitchEndpoint) fetchQuality(streamID string, quality string) (string, error) {
+func (t *TwitchEndpoint) fetchStream(streamID string, quality string) (string, error) {
 	streamLinkCmd := exec.Command("streamlink", "twitch.tv/"+streamID, "--http-header=Client-ID=jzkbprff40iqj646a697cyrvl0zt2m6", "--player-passthrough=http,hls,rtmp", "-j")
 	output, streamLinkError := streamLinkCmd.Output()
 
@@ -160,7 +160,7 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, "%s", "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"static/style.css\"><link rel=\"icon\" type=\"image/x-icon\" href=\"/static/favicon.ico\"/></head><body>")
+	fmt.Fprintf(w, "%s", "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"/static/style.css\"><link rel=\"icon\" type=\"image/x-icon\" href=\"/static/favicon.ico\"/></head><body>")
 	fmt.Fprintf(w, "%s",
 		`<script>
 		  function manualCast(element) {
