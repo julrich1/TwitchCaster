@@ -80,14 +80,12 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 		streamURL, err := t.fetchStream(streamID, quality)
 		if err != nil {
 			fmt.Println("Error fetching stream: ", err)
-			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
 		err = cast.URL(streamURL, ipAddress)
 		if err != nil {
 			fmt.Println("Error casting stream: ", err)
-			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 	}()
