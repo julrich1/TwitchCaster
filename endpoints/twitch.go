@@ -96,6 +96,7 @@ func (t *TwitchEndpoint) fetchStream(streamID string, quality string) (string, e
 	output, streamLinkError := streamLinkCmd.Output()
 
 	if streamLinkError != nil {
+		fmt.Printf("Streamlink output: %s\n", output)
 		return "", streamLinkError
 	}
 
@@ -112,7 +113,11 @@ func (t *TwitchEndpoint) fetchStream(streamID string, quality string) (string, e
 		// Couldn't find the requested quality - falling back
 		stream, ok = streamLinkResponse.Streams["480p"]
 		if !ok {
-			return "", errors.New("Could not find a lower quality stream")
+			fmt.Println("Using worst quality stream")
+			stream, ok = streamLinkResponse.Streams["worst"]
+			if !ok {
+				return "", errors.New("Could not find a lower quality stream")
+			}
 		}
 	}
 	return stream.URL, nil
