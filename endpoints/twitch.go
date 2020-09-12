@@ -140,7 +140,6 @@ func (t *TwitchEndpoint) fetchStream(streamID string, quality string) (string, e
 	baseURL, _ := url.Parse("https://hls-us-west.nightdev.com/get/playlist")
 	baseURL.RawQuery = params.Encode()
 
-	fmt.Println(baseURL)
 	resp, err = http.Get(baseURL.String())
 
 	if err != nil {
