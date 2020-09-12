@@ -4,14 +4,29 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
-	"os/exec"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"twitch-caster/cast"
 	"twitch-caster/models"
 	"twitch-caster/services"
 )
+
+type nightDevAuthResponse struct {
+	Sig   string          `json:"sig"`
+	Token json.RawMessage `json:"token"`
+}
+
+type nightDevPlaylistResponse struct {
+	Playlist []playlistData `json:"playlist"`
+}
+
+type playlistData struct {
+	URL string `json:"url"`
+}
 
 // Response object when quality is not specified
 type streamLinkFullResponse struct {
@@ -92,35 +107,67 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (t *TwitchEndpoint) fetchStream(streamID string, quality string) (string, error) {
-	streamLinkCmd := exec.Command("streamlink", "twitch.tv/"+streamID, "--http-header=Client-ID=jzkbprff40iqj646a697cyrvl0zt2m6", "--player-passthrough=http,hls,rtmp", "-j")
-	output, streamLinkError := streamLinkCmd.Output()
+	resp, err := http.Get("https://nightdev.com/api/1/twitchcast/token?channel=" + streamID)
 
-	if streamLinkError != nil {
-		fmt.Printf("Streamlink output: %s\n", output)
-		return "", streamLinkError
+	if err != nil {
+		fmt.Println(err)
+		return "", err
 	}
 
-	var streamLinkResponse streamLinkFullResponse
-	jsonError := json.Unmarshal(output, &streamLinkResponse)
-	if jsonError != nil {
-		return "", jsonError
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+
+	if err != nil {
+		fmt.Println(err)
+		return "", err
 	}
 
-	var stream streamLinkStreamInfo
-	var ok bool
-	stream, ok = streamLinkResponse.Streams[quality]
-	if !ok {
-		// Couldn't find the requested quality - falling back
-		stream, ok = streamLinkResponse.Streams["480p"]
-		if !ok {
-			fmt.Println("Using worst quality stream")
-			stream, ok = streamLinkResponse.Streams["worst"]
-			if !ok {
-				return "", errors.New("Could not find a lower quality stream")
-			}
-		}
+	var authResponse nightDevAuthResponse
+	err = json.Unmarshal(body, &authResponse)
+
+	if err != nil {
+		fmt.Println(err)
+		return "", err
 	}
-	return stream.URL, nil
+
+	cleanToken, _ := strconv.Unquote(string(authResponse.Token))
+
+	params := url.Values{}
+	params.Add("channel", streamID)
+	params.Add("sig", authResponse.Sig)
+	params.Add("token", cleanToken)
+
+	baseURL, _ := url.Parse("https://hls-us-west.nightdev.com/get/playlist")
+	baseURL.RawQuery = params.Encode()
+
+	fmt.Println(baseURL)
+	resp, err = http.Get(baseURL.String())
+
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+
+	defer resp.Body.Close()
+	body, err = ioutil.ReadAll(resp.Body)
+
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+
+	var playlistResponse nightDevPlaylistResponse
+	err = json.Unmarshal(body, &playlistResponse)
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+
+	if len(playlistResponse.Playlist) <= 0 {
+		return "", errors.New("Missing array payload")
+	}
+
+	return playlistResponse.Playlist[0].URL, nil
 }
 
 // TwitchChannelList is the entry point for an HTTP channel list request
