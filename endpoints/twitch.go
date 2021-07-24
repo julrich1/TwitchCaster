@@ -137,7 +137,7 @@ func (t *TwitchEndpoint) fetchStream(streamID string, quality string) (string, e
 	params.Add("sig", authResponse.Sig)
 	params.Add("token", cleanToken)
 
-	baseURL, _ := url.Parse("https://hls-us-west.nightdev.com/get/playlist")
+	baseURL, _ := url.Parse("https://hls-us-east.nightdev.com/get/playlist")
 	baseURL.RawQuery = params.Encode()
 
 	resp, err = http.Get(baseURL.String())
