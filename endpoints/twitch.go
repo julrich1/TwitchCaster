@@ -1,39 +1,27 @@
 package endpoints
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 
 	"twitch-caster/cast"
 	"twitch-caster/models"
 	"twitch-caster/services"
 )
 
-// Response object when quality is not specified
-type streamLinkFullResponse struct {
-	Streams map[string]streamLinkStreamInfo `json:"streams"`
-	Plugin  string                          `json:"plugin"`
-}
+const proxyPort = 50505
 
-type streamLinkStreamInfo struct {
-	Type    string `json:"type"`
-	URL     string `json:"url"`
-	Headers struct {
-		UserAgent      string `json:"User-Agent"`
-		AcceptEncoding string `json:"Accept-Encoding"`
-		Accept         string `json:"Accept"`
-		Connection     string `json:"Connection"`
-		ClientID       string `json:"Client-ID"`
-	} `json:"headers"`
-}
-
-type castJSONResponse struct {
-	Success bool `json:"success"`
-}
+var (
+	streamProcessMu sync.Mutex
+	streamProcess   *exec.Cmd
+)
 
 // TwitchEndpoint contains the endpoints for handling casting and listing the main GUI
 type TwitchEndpoint struct {
@@ -77,50 +65,137 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	go func() {
-		streamURL, err := t.fetchStream(streamID, quality)
-		if err != nil {
-			fmt.Println("Error fetching stream: ", err)
-			return
-		}
-
-		err = cast.URL(streamURL, ipAddress)
-		if err != nil {
-			fmt.Println("Error casting stream: ", err)
-			return
+		if err := proxyAndCast(streamID, quality, ipAddress); err != nil {
+			fmt.Println("Error casting stream:", err)
 		}
 	}()
 }
 
-func (t *TwitchEndpoint) fetchStream(streamID string, quality string) (string, error) {
-	streamLinkCmd := exec.Command("streamlink", "--twitch-supported-codecs", "h264", "twitch.tv/"+streamID, "--http-header=Client-ID=jzkbprff40iqj646a697cyrvl0zt2m6", "--player-passthrough=http,hls,rtmp", "-j")
-	output, streamLinkError := streamLinkCmd.Output()
+// proxyAndCast casts a Twitch stream to the Chromecast. For standard H264 HLS
+// streams it casts the HLS URL directly (Chromecast handles it natively). For
+// CMAF/fMP4 streams it starts a local streamlink HTTP proxy so the Chromecast
+// receives a plain video/mp4 byte stream instead of fragmented HLS segments.
+func proxyAndCast(streamID, quality, ipAddress string) error {
+	// Kill any previous proxy so the port is free for the new stream.
+	streamProcessMu.Lock()
+	if streamProcess != nil {
+		streamProcess.Process.Kill()
+		_ = streamProcess.Wait()
+		streamProcess = nil
+	}
+	streamProcessMu.Unlock()
 
-	if streamLinkError != nil {
-		fmt.Printf("Streamlink output: %s\n", output)
-		return "", streamLinkError
+	qualityArg := streamlinkQualityArg(quality)
+
+	// Try to get a direct H264 HLS URL first.
+	if hlsURL, err := getStreamURL(streamID, qualityArg, "--twitch-supported-codecs", "h264"); err == nil {
+		if cmaf, _ := isCMAFManifest(hlsURL); !cmaf {
+			fmt.Printf("Casting %s via direct HLS\n", streamID)
+			return cast.URL(hlsURL, ipAddress, "application/x-mpegURL")
+		}
 	}
 
-	var streamLinkResponse streamLinkFullResponse
-	jsonError := json.Unmarshal(output, &streamLinkResponse)
-	if jsonError != nil {
-		return "", jsonError
+	// No H264 stream or the manifest is CMAF — run a local proxy.
+	fmt.Printf("No direct H264 HLS for %s, using local proxy\n", streamID)
+	cmd, err := startProxy(streamID, qualityArg, nil)
+	if err != nil {
+		return err
 	}
 
-	var stream streamLinkStreamInfo
-	var ok bool
-	stream, ok = streamLinkResponse.Streams[quality]
-	if !ok {
-		// Couldn't find the requested quality - falling back
-		stream, ok = streamLinkResponse.Streams["480p"]
-		if !ok {
-			fmt.Println("Using worst quality stream")
-			stream, ok = streamLinkResponse.Streams["worst"]
-			if !ok {
-				return "", errors.New("Could not find a lower quality stream")
+	streamProcessMu.Lock()
+	streamProcess = cmd
+	streamProcessMu.Unlock()
+
+	localIP, err := getLocalIP()
+	if err != nil {
+		cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
+	}
+
+	streamURL := fmt.Sprintf("http://%s:%d", localIP, proxyPort)
+	fmt.Printf("Casting %s via local proxy %s\n", streamID, streamURL)
+	return cast.URL(streamURL, ipAddress, "video/mp4")
+}
+
+func getStreamURL(streamID, qualityArg string, extraArgs ...string) (string, error) {
+	args := append(append([]string{"--stream-url"}, extraArgs...), "twitch.tv/"+streamID, qualityArg)
+	out, err := exec.Command("streamlink", args...).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func isCMAFManifest(hlsURL string) (bool, error) {
+	resp, err := http.Get(hlsURL)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return strings.Contains(string(body), "#EXT-X-MAP"), nil
+}
+
+func startProxy(streamID, qualityArg string, extraArgs []string) (*exec.Cmd, error) {
+	args := append(
+		append([]string{}, extraArgs...),
+		"--player-external-http",
+		fmt.Sprintf("--player-external-http-port=%d", proxyPort),
+		"twitch.tv/"+streamID,
+		qualityArg,
+	)
+	cmd := exec.Command("streamlink", args...)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	if err := waitForPort(proxyPort, 15*time.Second); err != nil {
+		cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, err
+	}
+	return cmd, nil
+}
+
+// streamlinkQualityArg converts a Chromecast quality preference into a
+// streamlink quality string with fallbacks.
+func streamlinkQualityArg(quality string) string {
+	switch quality {
+	case "best":
+		return "best,worst"
+	case "high":
+		return "720p60,720p30,best,worst"
+	default:
+		return quality + ",best,worst"
+	}
+}
+
+func waitForPort(port int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("streamlink proxy not ready on port %d within %v", port, timeout)
+}
+
+func getLocalIP() (string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String(), nil
 			}
 		}
 	}
-	return stream.URL, nil
+	return "", errors.New("no local IP address found")
 }
 
 // TwitchChannelList is the entry point for an HTTP channel list request
@@ -155,7 +230,7 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 				http.onreadystatechange = (e) => {
 					if (http.readyState === 4 && http.status === 200) {
 					}
-				}											
+				}
 				http.send();
 			}
 		</script>`)

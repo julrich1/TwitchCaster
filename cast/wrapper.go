@@ -8,7 +8,7 @@ import (
 )
 
 // URL take a URL and IPAddress of a Chromecast device to play video on
-func URL(url string, ipAddress string) error {
+func URL(url string, ipAddress string, contentType string) error {
 	app := application.NewApplication()
 	entry := cmd.CachedDNSEntry{
 		Addr: ipAddress,
@@ -20,7 +20,7 @@ func URL(url string, ipAddress string) error {
 		return err
 	}
 
-	if err := app.Load(url, "", false, true); err != nil {
+	if err := app.Load(url, contentType, false, true); err != nil {
 		fmt.Printf("unable to load media: %v\n", err)
 		return err
 	}
