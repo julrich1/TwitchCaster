@@ -16,11 +16,16 @@ import (
 	"twitch-caster/services"
 )
 
-const proxyPort = 50505
+const proxyBasePort = 50505
+
+type streamProxy struct {
+	cmd  *exec.Cmd
+	port int
+}
 
 var (
-	streamProcessMu sync.Mutex
-	streamProcess   *exec.Cmd
+	streamProxyMu sync.Mutex
+	streamProxies = make(map[string]*streamProxy) // keyed by Chromecast IP
 )
 
 // TwitchEndpoint contains the endpoints for handling casting and listing the main GUI
@@ -75,47 +80,143 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 // streams it casts the HLS URL directly (Chromecast handles it natively). For
 // CMAF/fMP4 streams it starts a local streamlink HTTP proxy so the Chromecast
 // receives a plain video/mp4 byte stream instead of fragmented HLS segments.
+// Each Chromecast device gets its own proxy process and port, so multiple
+// devices can stream simultaneously.
 func proxyAndCast(streamID, quality, ipAddress string) error {
-	// Kill any previous proxy so the port is free for the new stream.
-	streamProcessMu.Lock()
-	if streamProcess != nil {
-		streamProcess.Process.Kill()
-		_ = streamProcess.Wait()
-		streamProcess = nil
-	}
-	streamProcessMu.Unlock()
-
 	qualityArg := streamlinkQualityArg(quality)
 
 	// Try to get a direct H264 HLS URL first.
 	if hlsURL, err := getStreamURL(streamID, qualityArg, "--twitch-supported-codecs", "h264"); err == nil {
 		if cmaf, _ := isCMAFManifest(hlsURL); !cmaf {
-			fmt.Printf("Casting %s via direct HLS\n", streamID)
+			killProxy(ipAddress) // release port if this device had a proxy before
+			fmt.Printf("Casting %s to %s via direct HLS\n", streamID, ipAddress)
 			return cast.URL(hlsURL, ipAddress, "application/x-mpegURL")
 		}
 	}
 
-	// No H264 stream or the manifest is CMAF — run a local proxy.
-	fmt.Printf("No direct H264 HLS for %s, using local proxy\n", streamID)
-	cmd, err := startProxy(streamID, qualityArg, nil)
+	// No H264 stream or the manifest is CMAF — run a local proxy for this device.
+	fmt.Printf("No direct H264 HLS for %s, starting proxy for %s\n", streamID, ipAddress)
+	port, err := startDeviceProxy(streamID, qualityArg, ipAddress)
 	if err != nil {
 		return err
 	}
-
-	streamProcessMu.Lock()
-	streamProcess = cmd
-	streamProcessMu.Unlock()
 
 	localIP, err := getLocalIP()
 	if err != nil {
-		cmd.Process.Kill()
-		_ = cmd.Wait()
+		killProxy(ipAddress)
 		return err
 	}
 
-	streamURL := fmt.Sprintf("http://%s:%d", localIP, proxyPort)
-	fmt.Printf("Casting %s via local proxy %s\n", streamID, streamURL)
+	streamURL := fmt.Sprintf("http://%s:%d", localIP, port)
+	fmt.Printf("Casting %s to %s via proxy %s\n", streamID, ipAddress, streamURL)
 	return cast.URL(streamURL, ipAddress, "video/mp4")
+}
+
+// startDeviceProxy kills any existing proxy for the device, allocates a free
+// port, and starts a new streamlink proxy. It also launches a goroutine that
+// removes the proxy from the map when streamlink exits (i.e. when the
+// Chromecast stops pulling data).
+func startDeviceProxy(streamID, qualityArg, ipAddress string) (int, error) {
+	streamProxyMu.Lock()
+	defer streamProxyMu.Unlock()
+
+	if existing, ok := streamProxies[ipAddress]; ok {
+		existing.cmd.Process.Kill()
+		_ = existing.cmd.Wait()
+		delete(streamProxies, ipAddress)
+	}
+
+	port := allocateProxyPort()
+	cmd, err := startProxy(streamID, qualityArg, port)
+	if err != nil {
+		return 0, err
+	}
+
+	streamProxies[ipAddress] = &streamProxy{cmd: cmd, port: port}
+
+	go monitorAndKillProxy(cmd, port, ipAddress)
+	go func() {
+		cmd.Wait()
+		streamProxyMu.Lock()
+		if p, ok := streamProxies[ipAddress]; ok && p.cmd == cmd {
+			delete(streamProxies, ipAddress)
+			fmt.Printf("Proxy for %s exited, port %d released\n", ipAddress, port)
+		}
+		streamProxyMu.Unlock()
+	}()
+
+	return port, nil
+}
+
+// monitorAndKillProxy waits for the Chromecast to connect to the proxy port,
+// then kills the streamlink process once the connection drops. Streamlink does
+// not exit on client disconnect for live streams, so we have to do this ourselves.
+func monitorAndKillProxy(cmd *exec.Cmd, port int, ipAddress string) {
+	// Wait up to 30s for the Chromecast to establish a connection.
+	connected := false
+	for i := 0; i < 30; i++ {
+		if hasActiveConnection(port) {
+			connected = true
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if !connected {
+		fmt.Printf("No connection on port %d after 30s, killing proxy for %s\n", port, ipAddress)
+		cmd.Process.Kill()
+		return
+	}
+
+	// Poll until the connection drops, with a grace period to ignore brief blips.
+	for {
+		time.Sleep(5 * time.Second)
+		if !hasActiveConnection(port) {
+			time.Sleep(10 * time.Second)
+			if !hasActiveConnection(port) {
+				fmt.Printf("Chromecast disconnected from port %d, killing proxy for %s\n", port, ipAddress)
+				cmd.Process.Kill()
+				return
+			}
+		}
+	}
+}
+
+func hasActiveConnection(port int) bool {
+	out, err := exec.Command("ss", "-tn").Output()
+	if err != nil {
+		return false
+	}
+	portStr := fmt.Sprintf(":%d", port)
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, portStr) && strings.Contains(line, "ESTAB") {
+			return true
+		}
+	}
+	return false
+}
+
+func killProxy(ipAddress string) {
+	streamProxyMu.Lock()
+	defer streamProxyMu.Unlock()
+	if proxy, ok := streamProxies[ipAddress]; ok {
+		proxy.cmd.Process.Kill()
+		_ = proxy.cmd.Wait()
+		delete(streamProxies, ipAddress)
+	}
+}
+
+// allocateProxyPort returns the lowest port in the proxyBasePort range not
+// currently in use by an active proxy. Must be called with streamProxyMu held.
+func allocateProxyPort() int {
+	used := make(map[int]bool)
+	for _, p := range streamProxies {
+		used[p.port] = true
+	}
+	for port := proxyBasePort; ; port++ {
+		if !used[port] {
+			return port
+		}
+	}
 }
 
 func getStreamURL(streamID, qualityArg string, extraArgs ...string) (string, error) {
@@ -137,19 +238,18 @@ func isCMAFManifest(hlsURL string) (bool, error) {
 	return strings.Contains(string(body), "#EXT-X-MAP"), nil
 }
 
-func startProxy(streamID, qualityArg string, extraArgs []string) (*exec.Cmd, error) {
-	args := append(
-		append([]string{}, extraArgs...),
+func startProxy(streamID, qualityArg string, port int) (*exec.Cmd, error) {
+	args := []string{
 		"--player-external-http",
-		fmt.Sprintf("--player-external-http-port=%d", proxyPort),
-		"twitch.tv/"+streamID,
+		fmt.Sprintf("--player-external-http-port=%d", port),
+		"twitch.tv/" + streamID,
 		qualityArg,
-	)
+	}
 	cmd := exec.Command("streamlink", args...)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	if err := waitForPort(proxyPort, 15*time.Second); err != nil {
+	if err := waitForPort(port, 15*time.Second); err != nil {
 		cmd.Process.Kill()
 		_ = cmd.Wait()
 		return nil, err
