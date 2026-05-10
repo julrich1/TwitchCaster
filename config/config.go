@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -23,7 +22,7 @@ func Load() models.Configuration {
 	}
 	exPath := filepath.Dir(ex)
 
-	data, err := ioutil.ReadFile(exPath + "/" + configFileName)
+	data, err := os.ReadFile(exPath + "/" + configFileName)
 	if err != nil {
 		log.Fatalln("Error reading configuration JSON file: ", err)
 	}

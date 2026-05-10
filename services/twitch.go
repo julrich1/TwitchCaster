@@ -5,15 +5,11 @@ import (
 	"twitch-caster/models"
 )
 
-const followedStreamersURL = "https://api.twitch.tv/helix/users/follows"
-const streamStatusURL = "https://api.twitch.tv/helix/streams"
-const gamesURL = "https://api.twitch.tv/helix/games"
+const followedStreamsURL = "https://api.twitch.tv/helix/streams/followed"
 const usersURL = "https://api.twitch.tv/helix/users"
 
 var endpoints = map[string]endpoint{
-	"TWITCH_FOLLOWERS":        {"GET", followedStreamersURL},
-	"TWITCH_STREAMERS_STATUS": {"GET", streamStatusURL},
-	"TWITCH_GAMES":            {"GET", gamesURL},
+	"TWITCH_FOLLOWED_STREAMS": {"GET", followedStreamsURL},
 	"TWITCH_USERS":            {"GET", usersURL},
 }
 
@@ -36,84 +32,36 @@ func NewTwitchService(settings models.Settings) *TwitchService {
 	return &twitchService
 }
 
-// FetchTwitchFollows fetches the followed streamers for a Twitch user
-func (t *TwitchService) FetchTwitchFollows() (models.TwitchFollowsResponse, error) {
-	var twitchFollowersData models.TwitchFollowsResponse
-	var endpoint = endpoints["TWITCH_FOLLOWERS"]
-
-	headers := map[string]string{}
-	t.appendCommonHeaders(headers)
-	err := t.appendTwitchAuthHeader(headers)
-	if err != nil {
-		return twitchFollowersData, err
-	}
-
-	queryParameters := map[string][]string{"from_id": {t.settings.UserID}, "first": {"100"}}
-
-	request := Request{endpoint.method, endpoint.url, headers, queryParameters}
-	err = MakeRequest(request, &twitchFollowersData)
-
-	return twitchFollowersData, err
+// HasUserToken reports whether a user-scoped access token is available.
+func (t *TwitchService) HasUserToken() bool {
+	return t.authManager.HasUserToken()
 }
 
-// FetchTwitchStreamersStatus calls the Twitch API to get additional information about streamers
-func (t *TwitchService) FetchTwitchStreamersStatus(twitchFollowsResponse models.TwitchFollowsResponse) (models.OnlineUsersResponse, error) {
-	var onlineUsersResponse models.OnlineUsersResponse
-	var endpoint = endpoints["TWITCH_STREAMERS_STATUS"]
+// FetchFollowedStreams returns all live streams from channels the user follows.
+// Requires a user access token with user:read:follows scope in configuration.
+func (t *TwitchService) FetchFollowedStreams() ([]models.OnlineStreamer, error) {
+	var followedStreamsResponse models.OnlineUsersResponse
+	endpoint := endpoints["TWITCH_FOLLOWED_STREAMS"]
 
 	headers := map[string]string{}
 	t.appendCommonHeaders(headers)
-	err := t.appendTwitchAuthHeader(headers)
-	if err != nil {
-		return onlineUsersResponse, err
+	if err := t.appendTwitchAuthHeader(headers); err != nil {
+		return nil, err
 	}
 
-	queryParameters := map[string][]string{}
-	queryParameters["first"] = []string{"100"}
-	queryParameters["user_id"] = []string{}
-	for _, element := range twitchFollowsResponse.Data {
-		queryParameters["user_id"] = append(queryParameters["user_id"], element.ToID)
+	queryParameters := map[string][]string{
+		"user_id": {t.settings.UserID},
+		"first":   {"100"},
 	}
 
 	request := Request{endpoint.method, endpoint.url, headers, queryParameters}
-	err = MakeRequest(request, &onlineUsersResponse)
+	if err := MakeRequest(request, &followedStreamsResponse); err != nil {
+		return nil, err
+	}
 
-	return onlineUsersResponse, err
-}
-
-// FetchGames calls the Twitch API to get information on games
-func (t *TwitchService) FetchGames(onlineUsers models.OnlineUsersResponse) ([]models.OnlineStreamer, error) {
-	var gamesResponse models.GamesResponse
-	var endpoint = endpoints["TWITCH_GAMES"]
-
-	headers := map[string]string{}
-	t.appendCommonHeaders(headers)
-	err := t.appendTwitchAuthHeader(headers)
+	usersResponse, err := t.fetchUsers(followedStreamsResponse)
 	if err != nil {
-		return []models.OnlineStreamer{}, err
-	}
-
-	gamesMap := make(map[string]bool)
-	for _, user := range onlineUsers.Data {
-		gamesMap[user.GameID] = true
-	}
-
-	queryParameters := map[string][]string{}
-	queryParameters["first"] = []string{"100"}
-	queryParameters["id"] = []string{}
-	for _, user := range onlineUsers.Data {
-		queryParameters["id"] = append(queryParameters["id"], user.GameID)
-	}
-
-	request := Request{endpoint.method, endpoint.url, headers, queryParameters}
-	err = MakeRequest(request, &gamesResponse)
-	if err != nil {
-		return []models.OnlineStreamer{}, err
-	}
-
-	usersResponse, err := t.FetchUsers(onlineUsers)
-	if err != nil {
-		return []models.OnlineStreamer{}, err
+		return nil, err
 	}
 
 	streamerIDToThumbnailMap := make(map[string]string)
@@ -121,36 +69,29 @@ func (t *TwitchService) FetchGames(onlineUsers models.OnlineUsersResponse) ([]mo
 		streamerIDToThumbnailMap[user.ID] = user.ProfileImageURL
 	}
 
-	gameIDToNameMap := make(map[string]string)
-	for _, game := range gamesResponse.Data {
-		gameIDToNameMap[game.ID] = game.Name
-	}
-
-	return onlineUsers.MakeOnlineStreamers(gameIDToNameMap, streamerIDToThumbnailMap), nil
+	return followedStreamsResponse.MakeOnlineStreamers(streamerIDToThumbnailMap), nil
 }
 
-// FetchUsers calls the Twitch API to get detailed user information
-func (t *TwitchService) FetchUsers(onlineUsers models.OnlineUsersResponse) (models.UsersResponse, error) {
+func (t *TwitchService) fetchUsers(onlineUsers models.OnlineUsersResponse) (models.UsersResponse, error) {
 	var usersResponse models.UsersResponse
-	var endpoint = endpoints["TWITCH_USERS"]
+	endpoint := endpoints["TWITCH_USERS"]
 
 	headers := map[string]string{}
 	t.appendCommonHeaders(headers)
-	err := t.appendTwitchAuthHeader(headers)
-	if err != nil {
+	if err := t.appendTwitchAuthHeader(headers); err != nil {
 		return usersResponse, err
 	}
 
-	queryParameters := map[string][]string{}
-	queryParameters["first"] = []string{"100"}
-	queryParameters["id"] = []string{}
+	queryParameters := map[string][]string{
+		"first": {"100"},
+		"id":    {},
+	}
 	for _, user := range onlineUsers.Data {
 		queryParameters["id"] = append(queryParameters["id"], user.UserID)
 	}
 
 	request := Request{endpoint.method, endpoint.url, headers, queryParameters}
-	err = MakeRequest(request, &usersResponse)
-	if err != nil {
+	if err := MakeRequest(request, &usersResponse); err != nil {
 		return usersResponse, err
 	}
 

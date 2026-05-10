@@ -1,21 +1,22 @@
 {
-    "settings": {
-        "userId": "123456",
-        "twitchClientId": "xxx",
-        "twitchSecret": "xxx",
-        "channelListURL": "/gui/twitch-channel-list",
-        "castURL": "/gui/cast/"
+  "settings": {
+    "userId": "12345",
+    "twitchClientId": "12345",
+    "twitchSecret": "12345",
+    "baseURL": "https://yourdomain.com",
+    "channelListURL": "/gui/twitch-channel-list",
+    "castURL": "/gui/cast/"
+  },
+  "chromecasts": [
+    {
+      "name": "Living Room",
+      "ipAddress": "192.168.1.1",
+      "qualityMax": "best"
     },
-    "chromecasts": [
-        { 
-            "name": "Living Room",
-            "ipAddress": "192.168.1.1",
-            "qualityMax": "best"
-        },
-        {
-            "name": "Kitchen",
-            "ipAddress": "192.168.1.2",
-            "qualityMax": "720p"
-        }
-    ]
+    {
+      "name": "Office",
+      "ipAddress": "192.168.1.2",
+      "qualityMax": "best"
+    }
+  ]
 }

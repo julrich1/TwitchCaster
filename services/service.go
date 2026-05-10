@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -43,7 +43,7 @@ func MakeRequest(request Request, responseObject interface{}) error {
 	}
 	defer res.Body.Close()
 
-	body, error := ioutil.ReadAll(res.Body)
+	body, error := io.ReadAll(res.Body)
 	if error != nil {
 		return errors.New("Error reading response")
 	}

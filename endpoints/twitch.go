@@ -92,7 +92,7 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (t *TwitchEndpoint) fetchStream(streamID string, quality string) (string, error) {
-	streamLinkCmd := exec.Command("streamlink", "twitch.tv/"+streamID, "--http-header=Client-ID=jzkbprff40iqj646a697cyrvl0zt2m6", "--player-passthrough=http,hls,rtmp", "-j")
+	streamLinkCmd := exec.Command("streamlink", "--twitch-supported-codecs", "h264", "twitch.tv/"+streamID, "--http-header=Client-ID=jzkbprff40iqj646a697cyrvl0zt2m6", "--player-passthrough=http,hls,rtmp", "-j")
 	output, streamLinkError := streamLinkCmd.Output()
 
 	if streamLinkError != nil {
@@ -125,21 +125,12 @@ func (t *TwitchEndpoint) fetchStream(streamID string, quality string) (string, e
 
 // TwitchChannelList is the entry point for an HTTP channel list request
 func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Request) {
-	twitchFollowsResponse, error := t.twitchService.FetchTwitchFollows()
-	if error != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Println(error)
+	if !t.twitchService.HasUserToken() {
+		http.Redirect(w, r, "/auth/twitch", http.StatusFound)
 		return
 	}
 
-	onlineUsersResponse, error := t.twitchService.FetchTwitchStreamersStatus(twitchFollowsResponse)
-	if error != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Println(error)
-		return
-	}
-
-	onlineStreamers, error := t.twitchService.FetchGames(onlineUsersResponse)
+	onlineStreamers, error := t.twitchService.FetchFollowedStreams()
 	if error != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Println(error)
@@ -181,7 +172,7 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 	for _, user := range onlineStreamers {
 		fmt.Fprintf(w, "%s",
 			"<div class='streamContainer'>"+
-				"<div onclick=\"castStreamer('"+user.Name+"', this);\" class='thumbnailContainer'>"+
+				"<div onclick=\"castStreamer('"+user.Login+"', this);\" class='thumbnailContainer'>"+
 				"<img src=\""+user.ThumbnailURL+"\" class='thumbnailImage'>"+
 				"<div class='viewerCountContainer'><div class='viewerCount'><script>document.write(parseInt("+user.ViewerCount+").toLocaleString()+' viewers')</script></div></div>"+
 				"</div>"+

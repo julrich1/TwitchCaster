@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -20,6 +20,10 @@ type authResponse struct {
 var storedAuthResponse authResponse
 var expiresTime time.Time
 
+// dynamicUserToken holds the token obtained via the OAuth flow. It is stored
+// in memory only and is reset when the app restarts.
+var dynamicUserToken string
+
 // Manager handles authentication for Twitch endpoints
 type Manager struct {
 	settings models.Settings
@@ -32,8 +36,23 @@ func NewManager(settings models.Settings) *Manager {
 	return &manager
 }
 
-// GetToken fetches a new bearer token used to make Twitch API requests
+// StoreUserToken saves a user access token obtained via the OAuth flow.
+func (a *Manager) StoreUserToken(token string) {
+	dynamicUserToken = token
+}
+
+// HasUserToken reports whether a user access token has been obtained via the OAuth flow.
+func (a *Manager) HasUserToken() bool {
+	return dynamicUserToken != ""
+}
+
+// GetToken returns a bearer token for Twitch API requests. It prefers a
+// dynamically obtained OAuth token and falls back to a client credentials app token.
 func (a *Manager) GetToken() (string, error) {
+	if dynamicUserToken != "" {
+		return dynamicUserToken, nil
+	}
+
 	if isSavedTokenValid() {
 		return storedAuthResponse.AccessToken, nil
 	}
@@ -53,7 +72,7 @@ func (a *Manager) GetToken() (string, error) {
 
 	defer res.Body.Close()
 
-	body, error := ioutil.ReadAll(res.Body)
+	body, error := io.ReadAll(res.Body)
 	if error != nil {
 		return "", errors.New("Error reading auth response")
 	}
