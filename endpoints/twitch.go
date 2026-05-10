@@ -1,6 +1,8 @@
 package endpoints
 
 import (
+	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -86,10 +88,10 @@ func proxyAndCast(streamID, quality, ipAddress string) error {
 	qualityArg := streamlinkQualityArg(quality)
 
 	// Try to get a direct H264 HLS URL first.
-	if hlsURL, err := getStreamURL(streamID, qualityArg, "--twitch-supported-codecs", "h264"); err == nil {
+	if hlsURL, quality, err := resolveStream(streamID, qualityArg, "--twitch-supported-codecs", "h264"); err == nil {
 		if cmaf, _ := isCMAFManifest(hlsURL); !cmaf {
 			killProxy(ipAddress) // release port if this device had a proxy before
-			fmt.Printf("Casting %s to %s via direct HLS\n", streamID, ipAddress)
+			fmt.Printf("Casting %s to %s via direct HLS [%s]\n", streamID, ipAddress, quality)
 			return cast.URL(hlsURL, ipAddress, "application/x-mpegURL")
 		}
 	}
@@ -219,13 +221,59 @@ func allocateProxyPort() int {
 	}
 }
 
-func getStreamURL(streamID, qualityArg string, extraArgs ...string) (string, error) {
-	args := append(append([]string{"--stream-url"}, extraArgs...), "twitch.tv/"+streamID, qualityArg)
+// resolveStream uses streamlink --json to get the HLS URL and actual quality
+// name (e.g. "1080p60") for the first available entry in the qualityArg
+// fallback chain (e.g. "best,worst" or "720p60,720p30,best,worst").
+func resolveStream(streamID, qualityArg string, extraArgs ...string) (url, quality string, err error) {
+	args := append(append([]string{"--json"}, extraArgs...), "twitch.tv/"+streamID)
 	out, err := exec.Command("streamlink", args...).Output()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+
+	var result struct {
+		Streams map[string]struct {
+			URL string `json:"url"`
+		} `json:"streams"`
+	}
+	if err = json.Unmarshal(out, &result); err != nil {
+		return "", "", err
+	}
+
+	aliases := map[string]bool{"best": true, "worst": true, "audio_only": true}
+
+	for _, q := range strings.Split(qualityArg, ",") {
+		q = strings.TrimSpace(q)
+		s, ok := result.Streams[q]
+		if !ok || s.URL == "" {
+			continue
+		}
+		// If q is an alias (best/worst), find the real resolution name.
+		canonical := q
+		if aliases[q] {
+			for name, other := range result.Streams {
+				if !aliases[name] && other.URL == s.URL {
+					canonical = name
+					break
+				}
+			}
+		}
+		return s.URL, canonical, nil
+	}
+
+	return "", "", fmt.Errorf("no stream available for %s at quality %s", streamID, qualityArg)
+}
+
+func parseStreamQuality(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if idx := strings.Index(line, "Opening stream: "); idx >= 0 {
+			rest := line[idx+len("Opening stream: "):]
+			if fields := strings.Fields(rest); len(fields) > 0 {
+				return fields[0]
+			}
+		}
+	}
+	return "unknown"
 }
 
 func isCMAFManifest(hlsURL string) (bool, error) {
@@ -246,9 +294,23 @@ func startProxy(streamID, qualityArg string, port int) (*exec.Cmd, error) {
 		qualityArg,
 	}
 	cmd := exec.Command("streamlink", args...)
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "Opening stream: ") {
+				fmt.Printf("Proxy for %s selected quality: %s\n", streamID, parseStreamQuality(line))
+			}
+		}
+		io.Copy(io.Discard, stderr)
+	}()
 	if err := waitForPort(port, 15*time.Second); err != nil {
 		cmd.Process.Kill()
 		_ = cmd.Wait()
