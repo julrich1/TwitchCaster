@@ -1,27 +1,14 @@
 package cast
 
-import (
-	"fmt"
+import "fmt"
 
-	"github.com/vishen/go-chromecast/application"
-	"github.com/vishen/go-chromecast/cmd"
-)
-
-// URL take a URL and IPAddress of a Chromecast device to play video on
-func URL(url string, ipAddress string, contentType string) error {
-	app := application.NewApplication()
-	entry := cmd.CachedDNSEntry{
-		Addr: ipAddress,
-		Port: 8009,
-	}
-
-	if err := app.Start(entry); err != nil {
-		fmt.Println("Unable to start app", err)
-		return err
-	}
-
-	if err := app.Load(url, contentType, false, true); err != nil {
-		fmt.Printf("unable to load media: %v\n", err)
+// URL casts a remote URL to a Chromecast device. Pass streamType "LIVE" for
+// live HLS streams and "BUFFERED" for progressive/VOD content.
+// appID selects the Cast receiver application; empty string uses the Default
+// Media Receiver (CC1AD845).
+func URL(url string, ipAddress string, contentType string, streamType string, appID string) error {
+	if err := loadMedia(ipAddress, appID, url, contentType, streamType); err != nil {
+		fmt.Printf("[%s] Cast failed: %v\n", ipAddress, err)
 		return err
 	}
 	return nil

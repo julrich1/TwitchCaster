@@ -1,5 +1,5 @@
 module twitch-caster
 
-go 1.13
+go 1.23.2
 
-require github.com/vishen/go-chromecast v0.2.0
+toolchain go1.24.3

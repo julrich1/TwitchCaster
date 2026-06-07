@@ -18,7 +18,8 @@ type Settings struct {
 
 // Chromecast objects that are cast targets
 type Chromecast struct {
-	Name       string `json:"name"`
-	IPAddress  string `json:"ipAddress"`
-	QualityMax string `json:"qualityMax"`
+	Name            string `json:"name"`
+	IPAddress       string `json:"ipAddress"`
+	QualityMax      string `json:"qualityMax"`
+	ReceiverAppID   string `json:"receiverAppId,omitempty"`
 }

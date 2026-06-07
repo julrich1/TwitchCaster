@@ -12,6 +12,7 @@
       "name": "Living Room",
       "ipAddress": "192.168.1.1",
       "qualityMax": "best"
+      "receiverAppId": "7BB8F04F"
     },
     {
       "name": "Office",
