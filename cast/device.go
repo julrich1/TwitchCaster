@@ -50,35 +50,57 @@ func (d *device) send(sourceID, destID, namespace, payload string) error {
 	})
 }
 
-// loadMedia connects to the Chromecast at ipAddress, launches appID, and sends
-// a LOAD command for the given URL. The connection is closed once the LOAD is
-// acknowledged, which does not interrupt playback on the receiver.
-func loadMedia(ipAddress, appID, url, contentType, streamType string) error {
+// Session holds an active connection to a Cast device with a launched app
+// ready to receive a LOAD command.
+type Session struct {
+	dev         *device
+	transportID string
+}
+
+// Close closes the underlying connection without sending a LOAD command.
+func (s *Session) Close() {
+	s.dev.conn.Close()
+}
+
+// LaunchApp connects to the Chromecast at ipAddress, launches appID, and waits
+// until the app reports ready. Call Load on the returned Session to begin
+// playback, or Close to abandon without loading media.
+func LaunchApp(ipAddress, appID string) (*Session, error) {
 	if appID == "" {
 		appID = defaultAppID
 	}
 
 	d, err := dialDevice(ipAddress)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer d.conn.Close()
 
 	if err := d.send(senderID, receiverID, nsConn, `{"type":"CONNECT"}`); err != nil {
-		return fmt.Errorf("CONNECT: %w", err)
+		d.conn.Close()
+		return nil, fmt.Errorf("CONNECT: %w", err)
 	}
 
 	launch, _ := json.Marshal(launchMsg{Type: "LAUNCH", RequestID: 1, AppID: appID})
 	if err := d.send(senderID, receiverID, nsReceiver, string(launch)); err != nil {
-		return fmt.Errorf("LAUNCH: %w", err)
+		d.conn.Close()
+		return nil, fmt.Errorf("LAUNCH: %w", err)
 	}
 
 	transportID, err := d.waitForApp(appID, 60*time.Second)
 	if err != nil {
-		return fmt.Errorf("waiting for %s to launch: %w", appID, err)
+		d.conn.Close()
+		return nil, fmt.Errorf("waiting for %s to launch: %w", appID, err)
 	}
 
-	if err := d.send(senderID, transportID, nsConn, `{"type":"CONNECT"}`); err != nil {
+	return &Session{dev: d, transportID: transportID}, nil
+}
+
+// Load sends a LOAD command and closes the connection. Playback continues on
+// the Cast device after the connection is closed.
+func (s *Session) Load(url, contentType, streamType string) error {
+	defer s.dev.conn.Close()
+
+	if err := s.dev.send(senderID, s.transportID, nsConn, `{"type":"CONNECT"}`); err != nil {
 		return fmt.Errorf("CONNECT transport: %w", err)
 	}
 
@@ -92,11 +114,22 @@ func loadMedia(ipAddress, appID, url, contentType, streamType string) error {
 			StreamType:  streamType,
 		},
 	})
-	if err := d.send(senderID, transportID, nsMedia, string(load)); err != nil {
+	if err := s.dev.send(senderID, s.transportID, nsMedia, string(load)); err != nil {
 		return fmt.Errorf("LOAD: %w", err)
 	}
 
 	return nil
+}
+
+// loadMedia connects to the Chromecast at ipAddress, launches appID, and sends
+// a LOAD command for the given URL. The connection is closed once the LOAD is
+// sent, which does not interrupt playback on the receiver.
+func loadMedia(ipAddress, appID, url, contentType, streamType string) error {
+	session, err := LaunchApp(ipAddress, appID)
+	if err != nil {
+		return err
+	}
+	return session.Load(url, contentType, streamType)
 }
 
 // waitForApp reads messages until RECEIVER_STATUS shows appID running, then

@@ -102,21 +102,61 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 }
 
 // proxyAndCast casts a Twitch stream to the Chromecast.
-//   - Direct H264 HLS (non-CMAF): cast directly, all devices handle this natively.
-//   - CMAF, mpegTS device (Google TV): run streamlink | ffmpeg to produce a live
-//     TS-based HLS stream on disk; Chromecast fetches it via our file server so
-//     ExoPlayer uses HlsMediaSource instead of ProgressiveMediaSource.
-//   - CMAF, other devices: streamlink HTTP proxy delivering raw fMP4 as video/mp4.
+//   - Custom receiver: always HLS file proxy (CORS blocks direct CDN access);
+//     proxy startup and Chromecast app launch run concurrently.
+//   - Default receiver, direct H264 HLS (non-CMAF): cast directly.
+//   - Default receiver, CMAF: HLS file proxy (mpegTS repack via ffmpeg).
+//   - Fallback: streamlink HTTP proxy delivering raw fMP4 as video/mp4.
 func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, serverBaseURL string) error {
 	qualityArg := streamlinkQualityArg(quality)
 	customReceiver := appID != "" && appID != "CC1AD845"
 
+	if customReceiver {
+		// Pre-compute the cast URL — derived from device IP, no network calls needed.
+		hlsID := strings.ReplaceAll(ipAddress, ".", "-")
+		var castURL string
+		if serverBaseURL != "" {
+			castURL = fmt.Sprintf("%s/hls-files/%s/index.m3u8", serverBaseURL, hlsID)
+		} else {
+			localIP, err := getLocalIP()
+			if err != nil {
+				return err
+			}
+			castURL = fmt.Sprintf("http://%s:%d/hls-files/%s/index.m3u8", localIP, serverPort, hlsID)
+		}
+
+		// Start proxy and Chromecast app launch concurrently.
+		var proxyErr, launchErr error
+		var session *cast.Session
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			proxyErr = startDeviceHLSProxy(streamID, qualityArg, ipAddress)
+		}()
+		go func() {
+			defer wg.Done()
+			session, launchErr = cast.LaunchApp(ipAddress, appID)
+		}()
+		wg.Wait()
+
+		if proxyErr != nil {
+			if session != nil {
+				session.Close()
+			}
+			return proxyErr
+		}
+		if launchErr != nil {
+			killProxy(ipAddress)
+			return launchErr
+		}
+		fmt.Printf("[%s] Casting %s via HLS file proxy (custom receiver)\n", ipAddress, streamID)
+		return session.Load(castURL, "application/x-mpegURL", "LIVE")
+	}
+
 	if hlsURL, resolvedQuality, err := resolveStream(streamID, qualityArg, "--twitch-supported-codecs", "h264"); err == nil {
 		cmaf, _ := isCMAFManifest(hlsURL)
-		// Custom web receivers enforce browser CORS — the raw Twitch CDN URL is
-		// cross-origin from the receiver's domain, so always proxy through our
-		// server. The Default Media Receiver (ExoPlayer) has no such restriction.
-		if !cmaf && !customReceiver {
+		if !cmaf {
 			killProxy(ipAddress)
 			fmt.Printf("[%s] Casting %s via direct HLS [%s]\n", ipAddress, streamID, resolvedQuality)
 			return cast.URL(hlsURL, ipAddress, "application/x-mpegURL", "LIVE", appID)
@@ -124,18 +164,12 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		if err := startDeviceHLSProxy(streamID, qualityArg, ipAddress); err != nil {
 			return err
 		}
-		hlsID := strings.ReplaceAll(ipAddress, ".", "-")
-		var castURL string
-		if customReceiver && serverBaseURL != "" {
-			castURL = fmt.Sprintf("%s/hls-files/%s/index.m3u8", serverBaseURL, hlsID)
-		} else {
-			localIP, err := getLocalIP()
-			if err != nil {
-				killProxy(ipAddress)
-				return err
-			}
-			castURL = fmt.Sprintf("http://%s:%d/hls-files/%s/index.m3u8", localIP, serverPort, hlsID)
+		localIP, err := getLocalIP()
+		if err != nil {
+			killProxy(ipAddress)
+			return err
 		}
+		castURL := fmt.Sprintf("http://%s:%d/hls-files/%s/index.m3u8", localIP, serverPort, strings.ReplaceAll(ipAddress, ".", "-"))
 		fmt.Printf("[%s] Casting %s via HLS file proxy [%s]\n", ipAddress, streamID, resolvedQuality)
 		return cast.URL(castURL, ipAddress, "application/x-mpegURL", "LIVE", appID)
 	}
@@ -172,7 +206,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string) error {
 	slCmd := exec.Command("streamlink",
 		"--stdout",
 		"--hls-segment-stream-data",
-		"--hls-live-edge=6",
+		"--hls-live-edge=3",
 		"--stream-segment-threads=2",
 		"twitch.tv/"+streamID,
 		qualityArg,
@@ -246,7 +280,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string) error {
 				break
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	if segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.ts")); len(segs) == 0 {
 		slCmd.Process.Kill()
@@ -572,8 +606,8 @@ func startProxy(streamID, qualityArg string, port int) (*exec.Cmd, error) {
 	args := []string{
 		"--player-external-http",
 		fmt.Sprintf("--player-external-http-port=%d", port),
-		"--hls-segment-stream-data", // stream segment bytes as they arrive, no pause at segment boundaries
-		"--hls-live-edge=6",         // pre-fetch 6 segments (~12-24s ahead) to absorb any jitter
+		"--hls-segment-stream-data",
+		"--hls-live-edge=3",
 		"--stream-segment-threads=2",
 		"twitch.tv/" + streamID,
 		qualityArg,
