@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"twitch-caster/config"
 	"twitch-caster/endpoints"
@@ -26,6 +27,8 @@ func main() {
 	http.HandleFunc("/oauth", authEndpoint.OAuthCallback)
 	http.HandleFunc(config.Settings.ChannelListURL, twitchEndpoint.TwitchChannelList)
 	http.HandleFunc(config.Settings.CastURL, twitchEndpoint.CastTwitch)
+	http.HandleFunc("/stop-cast/", twitchEndpoint.StopCast)
+	http.HandleFunc("/stop-cast", twitchEndpoint.StopCast)
 	http.HandleFunc("/stream/", twitchEndpoint.StreamProxy)
 
 	// Serve ffmpeg-generated HLS files for mpegTS devices (Google TV).
@@ -36,6 +39,12 @@ func main() {
 	os.RemoveAll(hlsRoot)
 	os.MkdirAll(hlsRoot, 0755)
 	http.Handle("/hls-files/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Record access so the proxy watchdog knows the receiver is still active.
+		// Path is /hls-files/{hlsID}/..., so parts[2] is the hlsID.
+		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/hls-files/"), "/", 2)
+		if len(parts) > 0 && parts[0] != "" {
+			endpoints.RecordHLSAccess(parts[0])
+		}
 		switch filepath.Ext(r.URL.Path) {
 		case ".m3u8":
 			w.Header().Set("Content-Type", "application/x-mpegURL")

@@ -13,6 +13,14 @@ Custom Cast receiver (app ID 7BB8F04F) hosted at https://twitch.shadowline.net/r
 
 **How to apply:** All Chromecasts are configured with `"receiverAppId": "7BB8F04F"` in configuration.json. Go code always routes through HLS file proxy (ffmpeg → TS) when a custom receiver is in use, serving from the external HTTPS URL to avoid CORS.
 
+## Proxy lifecycle
+- Custom receiver always uses HLS file proxy (ffmpeg → TS segments) served via external HTTPS URL to avoid CORS
+- 2-minute idle watchdog kills proxy if no segments fetched (catches TV sleep, home screen nav, etc.)
+- Receiver sends `sendBeacon('/stop-cast/{hlsID}')` on VISIBILITY_CHANGED (TV standby) to kill proxy immediately
+- Route `/stop-cast/` AND `/stop-cast` both registered for backward compat with cached receivers
+- hlsID is extracted from the contentId URL in a LOAD interceptor (`/hls-files/([^/]+)/`)
+- nginx strips the real IP so device is identified by hlsID in path, not request IP
+
 ## Gotchas discovered on Google TV Streamer
 
 - `playerManager.getMediaElement()` does NOT exist on this device's Cast SDK version. Use `document.querySelector('cast-media-player')` and call `.getMediaElement()` on the element instead.

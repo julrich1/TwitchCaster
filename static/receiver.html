@@ -13,7 +13,37 @@
 <body>
   <cast-media-player></cast-media-player>
   <script>
-    cast.framework.CastReceiverContext.getInstance().start({ disableIdleTimeout: true });
+    var context = cast.framework.CastReceiverContext.getInstance();
+    var playerManager = context.getPlayerManager();
+    var deviceHlsId = null;
+
+    // Extract the device hlsID from the HLS URL so we can tell the server which
+    // proxy to kill without relying on the request IP (nginx strips the real IP).
+    playerManager.setMessageInterceptor(
+      cast.framework.messages.MessageType.LOAD,
+      function(loadRequestData) {
+        var match = loadRequestData.media.contentId.match(/\/hls-files\/([^/]+)\//);
+        if (match) deviceHlsId = match[1];
+        return loadRequestData;
+      }
+    );
+
+    context.addEventListener(
+      cast.framework.system.EventType.VISIBILITY_CHANGED,
+      function(event) {
+        if (!event.isVisible) {
+          playerManager.stop();
+          var url = '/stop-cast' + (deviceHlsId ? '/' + deviceHlsId : '');
+          if (typeof navigator.sendBeacon === 'function') {
+            navigator.sendBeacon(url);
+          } else {
+            fetch(url, { method: 'POST' }).catch(function() {});
+          }
+        }
+      }
+    );
+
+    context.start({ disableIdleTimeout: true });
   </script>
 </body>
 </html>

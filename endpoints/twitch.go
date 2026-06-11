@@ -33,7 +33,17 @@ var (
 	streamProxyMu sync.Mutex
 	streamProxies = make(map[string]*streamProxy) // keyed by Chromecast IP
 
+	hlsAccessMu   sync.Mutex
+	hlsLastAccess = make(map[string]time.Time) // keyed by Chromecast IP
 )
+
+// RecordHLSAccess notes that the given hlsID (e.g. "192-168-1-233") was just served.
+func RecordHLSAccess(hlsID string) {
+	ip := strings.ReplaceAll(hlsID, "-", ".")
+	hlsAccessMu.Lock()
+	hlsLastAccess[ip] = time.Now()
+	hlsAccessMu.Unlock()
+}
 
 // TwitchEndpoint contains the endpoints for handling casting and listing the main GUI
 type TwitchEndpoint struct {
@@ -250,6 +260,32 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string) error {
 	streamProxyMu.Lock()
 	streamProxies[ipAddress] = &streamProxy{cmd: slCmd, ffmpegCmd: ffCmd, hlsDir: hlsDir}
 	streamProxyMu.Unlock()
+
+	// Seed the access time so the watchdog counts from first-segment-ready, not from
+	// process start, giving the receiver time to make its first request.
+	hlsAccessMu.Lock()
+	hlsLastAccess[ipAddress] = time.Now()
+	hlsAccessMu.Unlock()
+
+	go func() {
+		for {
+			time.Sleep(30 * time.Second)
+			streamProxyMu.Lock()
+			p, ok := streamProxies[ipAddress]
+			streamProxyMu.Unlock()
+			if !ok || p.cmd != slCmd {
+				return // proxy was replaced or killed
+			}
+			hlsAccessMu.Lock()
+			last := hlsLastAccess[ipAddress]
+			hlsAccessMu.Unlock()
+			if time.Since(last) > 2*time.Minute {
+				fmt.Printf("[%s] HLS proxy idle for 2 minutes, stopping\n", ipAddress)
+				killProxy(ipAddress)
+				return
+			}
+		}
+	}()
 
 	go func() {
 		_ = slCmd.Wait()
@@ -607,6 +643,22 @@ func getLocalIP() (string, error) {
 		}
 	}
 	return "", errors.New("no local IP address found")
+}
+
+// StopCast kills the HLS proxy for a device. The receiver calls
+// /stop-cast/{hlsID} (e.g. /stop-cast/192-168-1-233) so the device is
+// identified by path rather than request IP, which nginx would mask.
+func (t *TwitchEndpoint) StopCast(w http.ResponseWriter, r *http.Request) {
+	hlsID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/stop-cast"), "/")
+	if hlsID == "" {
+		fmt.Printf("Stop cast request (no device ID)\n")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	ip := strings.ReplaceAll(hlsID, "-", ".")
+	fmt.Printf("Stop cast request for %s\n", ip)
+	killProxy(ip)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // TwitchChannelList is the entry point for an HTTP channel list request
