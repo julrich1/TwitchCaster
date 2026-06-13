@@ -6,10 +6,12 @@ import (
 )
 
 const followedStreamsURL = "https://api.twitch.tv/helix/streams/followed"
+const streamsURL = "https://api.twitch.tv/helix/streams"
 const usersURL = "https://api.twitch.tv/helix/users"
 
 var endpoints = map[string]endpoint{
 	"TWITCH_FOLLOWED_STREAMS": {"GET", followedStreamsURL},
+	"TWITCH_STREAMS":          {"GET", streamsURL},
 	"TWITCH_USERS":            {"GET", usersURL},
 }
 
@@ -96,6 +98,33 @@ func (t *TwitchService) fetchUsers(onlineUsers models.OnlineUsersResponse) (mode
 	}
 
 	return usersResponse, nil
+}
+
+// FetchStreamByLogin returns the current title and game for a single stream
+// identified by the streamer's login name. Returns empty strings if the stream
+// is offline or the login is not found.
+func (t *TwitchService) FetchStreamByLogin(login string) (title, game string, err error) {
+	var resp models.OnlineUsersResponse
+	ep := endpoints["TWITCH_STREAMS"]
+
+	headers := map[string]string{}
+	t.appendCommonHeaders(headers)
+	if err = t.appendTwitchAuthHeader(headers); err != nil {
+		return "", "", err
+	}
+
+	req := Request{ep.method, ep.url, headers, map[string][]string{
+		"user_login": {login},
+		"first":      {"1"},
+	}}
+	if err = MakeRequest(req, &resp); err != nil {
+		return "", "", err
+	}
+	if len(resp.Data) == 0 {
+		return "", "", nil
+	}
+	d := resp.Data[0]
+	return d.Title, d.GameName, nil
 }
 
 func (t *TwitchService) appendTwitchAuthHeader(headers map[string]string) error {

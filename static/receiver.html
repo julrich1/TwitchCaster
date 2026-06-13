@@ -3,30 +3,423 @@
 <head>
   <meta charset="utf-8">
   <title>TwitchCaster Receiver</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Exo+2:wght@200;300&display=swap" rel="stylesheet">
   <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
   <style>
-    * { margin: 0; padding: 0; }
-    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-    cast-media-player { display: block; width: 100%; height: 100%; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #070710; overflow: hidden; }
+    cast-media-player { display: block; width: 100%; height: 100%; position: relative; z-index: 1; }
+
+    /* ── Idle screen ── */
+    #idle-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 2;
+      overflow: hidden;
+      font-family: 'Exo 2', sans-serif;
+      background: #070710;
+    }
+
+    /* Aurora glow */
+    .idle-aurora {
+      position: absolute;
+      inset: -30%;
+      width: 160%;
+      height: 160%;
+      background:
+        radial-gradient(ellipse 60% 50% at 15% 60%, rgba(145,70,255,.20) 0%, transparent 60%),
+        radial-gradient(ellipse 50% 40% at 85% 22%, rgba(100,40,200,.15) 0%, transparent 55%),
+        radial-gradient(ellipse 40% 55% at 52% 92%, rgba(0,180,255,.09) 0%, transparent 50%);
+      animation: idle-aurora 28s ease-in-out infinite alternate;
+      will-change: transform;
+    }
+    @keyframes idle-aurora {
+      from { transform: translate(0,0) rotate(0deg); }
+      to   { transform: translate(-4%,3%) rotate(3deg); }
+    }
+
+    /* Subtle grid */
+    .idle-grid {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(145,70,255,.032) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(145,70,255,.032) 1px, transparent 1px);
+      background-size: 80px 80px;
+      animation: idle-grid 70s linear infinite;
+    }
+    @keyframes idle-grid {
+      to { background-position: 80px 80px; }
+    }
+
+    /* Vignette */
+    .idle-vignette {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse 82% 82% at 50% 50%, transparent 25%, rgba(0,0,0,.78) 100%);
+    }
+
+    /* Floating color orbs */
+    .idle-orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(90px);
+      will-change: transform;
+    }
+    .idle-orb-1 {
+      width: 700px; height: 700px;
+      top: -220px; left: -180px;
+      background: radial-gradient(circle, rgba(145,70,255,.22) 0%, transparent 70%);
+      animation: orb1 32s ease-in-out infinite;
+    }
+    .idle-orb-2 {
+      width: 580px; height: 580px;
+      bottom: -160px; right: -120px;
+      background: radial-gradient(circle, rgba(0,190,255,.11) 0%, transparent 70%);
+      animation: orb2 26s ease-in-out infinite;
+    }
+    @keyframes orb1 {
+      0%,100% { transform: translate(0,0); }
+      50%     { transform: translate(110px,70px); }
+    }
+    @keyframes orb2 {
+      0%,100% { transform: translate(0,0); }
+      50%     { transform: translate(-70px,-55px); }
+    }
+
+    /* Corner viewfinder brackets */
+    .idle-corner {
+      position: absolute;
+      width: 36px;
+      height: 36px;
+      border-color: rgba(145,70,255,.38);
+      border-style: solid;
+    }
+    .idle-corner-tl { top: 44px;    left: 44px;    border-width: 2px 0 0 2px; }
+    .idle-corner-tr { top: 44px;    right: 44px;   border-width: 2px 2px 0 0; }
+    .idle-corner-bl { bottom: 44px; left: 44px;    border-width: 0 0 2px 2px; }
+    .idle-corner-br { bottom: 44px; right: 44px;   border-width: 0 2px 2px 0; }
+
+    /* Center content */
+    .idle-center {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* Spinning monogram badge */
+    .idle-badge {
+      position: relative;
+      width: 116px;
+      height: 116px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 36px;
+    }
+    .idle-badge::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: conic-gradient(from 0deg, #9146FF 0%, #c084fc 25%, rgba(0,212,255,.6) 40%, transparent 55%, transparent 72%, #9146FF 100%);
+      animation: badge-spin 9s linear infinite;
+    }
+    .idle-badge::after {
+      content: '';
+      position: absolute;
+      inset: 4px;
+      border-radius: 50%;
+      background: #070710;
+    }
+    .idle-badge-inner {
+      position: absolute;
+      inset: 18px;
+      border-radius: 50%;
+      border: 1px solid rgba(145,70,255,.22);
+      z-index: 1;
+    }
+    .idle-badge-letter {
+      position: relative;
+      z-index: 2;
+      font-family: 'Orbitron', monospace;
+      font-size: 42px;
+      font-weight: 900;
+      color: #9146FF;
+      text-shadow: 0 0 28px rgba(145,70,255,.7);
+      line-height: 1;
+    }
+    @keyframes badge-spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Logotype */
+    .idle-title {
+      font-family: 'Orbitron', monospace;
+      font-size: 84px;
+      font-weight: 900;
+      letter-spacing: -.01em;
+      line-height: 1;
+      margin: 0;
+    }
+    .idle-title-twitch {
+      color: #9146FF;
+      text-shadow: 0 0 55px rgba(145,70,255,.55), 0 0 110px rgba(145,70,255,.2);
+    }
+    .idle-title-caster {
+      color: #fff;
+      text-shadow: 0 0 35px rgba(255,255,255,.12);
+    }
+
+    /* Divider */
+    .idle-divider {
+      width: 380px;
+      height: 1px;
+      margin: 30px 0 26px;
+      background: linear-gradient(90deg,
+        transparent 0%,
+        rgba(145,70,255,.55) 20%,
+        rgba(145,70,255,.55) 80%,
+        transparent 100%);
+    }
+
+    /* Subtitle */
+    .idle-subtitle {
+      font-size: 13px;
+      font-weight: 200;
+      letter-spacing: .52em;
+      color: rgba(255,255,255,.26);
+      text-transform: uppercase;
+    }
+
+    /* Pulsing wait dots */
+    .idle-dots {
+      display: flex;
+      gap: 10px;
+      margin-top: 40px;
+    }
+    .idle-dots i {
+      display: block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #9146FF;
+      animation: idle-dot 2.1s ease-in-out infinite;
+    }
+    .idle-dots i:nth-child(2) { animation-delay: .32s; }
+    .idle-dots i:nth-child(3) { animation-delay: .64s; }
+    @keyframes idle-dot {
+      0%,55%,100% { opacity: .18; transform: scale(.75); }
+      27%          { opacity: 1;   transform: scale(1);   }
+    }
+
+    /* Footer status */
+    .idle-footer {
+      position: absolute;
+      bottom: 52px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 24px;
+      border: 1px solid rgba(145,70,255,.18);
+      background: rgba(145,70,255,.06);
+    }
+    .idle-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #9146FF;
+      box-shadow: 0 0 8px #9146FF, 0 0 18px rgba(145,70,255,.45);
+      animation: status-blink 2.8s ease-in-out infinite;
+    }
+    @keyframes status-blink {
+      0%,100% { opacity: 1; }
+      50%     { opacity: .28; }
+    }
+    .idle-footer span {
+      font-size: 11px;
+      font-weight: 200;
+      letter-spacing: .48em;
+      color: rgba(255,255,255,.28);
+      text-transform: uppercase;
+    }
+
+    /* ── Quality overlay (shown with seek bar) ── */
+    #quality-overlay {
+      display: none;
+      position: fixed;
+      top: 52px;
+      right: 60px;
+      z-index: 3;
+      align-items: baseline;
+      gap: 14px;
+    }
+    #quality-res {
+      font-family: 'Orbitron', monospace;
+      font-size: 26px;
+      font-weight: 700;
+      color: #fff;
+      text-shadow: 0 0 20px rgba(145,70,255,.65);
+    }
+    #quality-fps {
+      font-family: 'Orbitron', monospace;
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: .08em;
+    }
   </style>
 </head>
 <body>
+
+  <div id="idle-screen">
+    <div class="idle-aurora"></div>
+    <div class="idle-grid"></div>
+    <div class="idle-vignette"></div>
+    <div class="idle-orb idle-orb-1"></div>
+    <div class="idle-orb idle-orb-2"></div>
+
+    <div class="idle-corner idle-corner-tl"></div>
+    <div class="idle-corner idle-corner-tr"></div>
+    <div class="idle-corner idle-corner-bl"></div>
+    <div class="idle-corner idle-corner-br"></div>
+
+    <div class="idle-center">
+      <div class="idle-badge">
+        <div class="idle-badge-inner"></div>
+        <span class="idle-badge-letter">T</span>
+      </div>
+      <h1 class="idle-title">
+        <span class="idle-title-twitch">Twitch</span><span class="idle-title-caster">Caster</span>
+      </h1>
+      <div class="idle-divider"></div>
+      <p class="idle-subtitle">Live Stream Receiver</p>
+      <div class="idle-dots"><i></i><i></i><i></i></div>
+    </div>
+
+    <div class="idle-footer">
+      <div class="idle-status-dot"></div>
+      <span>Ready to Cast</span>
+    </div>
+  </div>
+
+  <div id="quality-overlay">
+    <span id="quality-res"></span>
+    <span id="quality-fps"></span>
+  </div>
+
   <cast-media-player></cast-media-player>
+
   <script>
     var context = cast.framework.CastReceiverContext.getInstance();
     var playerManager = context.getPlayerManager();
     var deviceHlsId = null;
+    var streamLogin = null;
+    var pollingInterval = null;
+    var qualityOverlayTimer = null;
 
-    // Extract the device hlsID from the HLS URL so we can tell the server which
-    // proxy to kill without relying on the request IP (nginx strips the real IP).
     playerManager.setMessageInterceptor(
       cast.framework.messages.MessageType.LOAD,
       function(loadRequestData) {
         var match = loadRequestData.media.contentId.match(/\/hls-files\/([^/]+)\//);
         if (match) deviceHlsId = match[1];
+
+        var custom = loadRequestData.media.customData;
+        if (custom && custom.login) {
+          streamLogin = custom.login;
+          startStreamInfoPolling();
+        }
+        if (custom && custom.resolution) {
+          document.getElementById('quality-res').textContent = custom.resolution;
+          document.getElementById('quality-fps').textContent = custom.fps || '';
+        } else {
+          document.getElementById('quality-res').textContent = '';
+          document.getElementById('quality-fps').textContent = '';
+        }
+
+        document.getElementById('idle-screen').style.display = 'none';
         return loadRequestData;
       }
     );
+
+    function showQualityOverlay() {
+      if (!document.getElementById('quality-res').textContent) return;
+      var el = document.getElementById('quality-overlay');
+      el.style.display = 'flex';
+      if (qualityOverlayTimer) clearTimeout(qualityOverlayTimer);
+      qualityOverlayTimer = setTimeout(function() {
+        el.style.display = 'none';
+        qualityOverlayTimer = null;
+      }, 5000);
+    }
+
+    // Show overlay whenever the seek bar appears.
+
+    // Cast protocol messages (pause/play/seek from phone/app remote).
+    [
+      cast.framework.messages.MessageType.PAUSE,
+      cast.framework.messages.MessageType.PLAY,
+      cast.framework.messages.MessageType.SEEK,
+      cast.framework.messages.MessageType.GET_STATUS,
+    ].forEach(function(type) {
+      try {
+        playerManager.setMessageInterceptor(type, function(req) {
+          showQualityOverlay();
+          return req;
+        });
+      } catch(e) {}
+    });
+
+    // Physical remote button presses arrive as keydown events. Use capture phase
+    // so we see them before cast-media-player can stop propagation.
+    window.addEventListener('keydown', showQualityOverlay, true);
+
+    // cast-media-player changes attributes (e.g. player state) when seek bar
+    // appears — observe those changes as an additional trigger.
+    try {
+      var cmpEl = document.querySelector('cast-media-player');
+      if (cmpEl) {
+        new MutationObserver(showQualityOverlay).observe(cmpEl, { attributes: true });
+      }
+    } catch(e) {}
+
+    function showIdleScreen() {
+      document.getElementById('idle-screen').style.display = '';
+      if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+      streamLogin = null;
+    }
+
+    try {
+      playerManager.addEventListener(cast.framework.events.EventType.ENDED, showIdleScreen);
+      playerManager.addEventListener(cast.framework.events.EventType.ERROR, showIdleScreen);
+    } catch(e) {}
+
+    function startStreamInfoPolling() {
+      if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+      pollingInterval = setInterval(function() {
+        if (!streamLogin) return;
+        fetch('/stream-info/' + streamLogin)
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            var info = playerManager.getMediaInformation();
+            if (!info) return;
+            var meta = info.metadata || new cast.framework.messages.GenericMediaMetadata();
+            if (data.title !== meta.title || data.game !== meta.subtitle) {
+              meta.title = data.title;
+              meta.subtitle = data.game;
+              info.metadata = meta;
+              playerManager.setMediaInformation(info, false);
+            }
+          })
+          .catch(function() {});
+      }, 60000);
+    }
 
     context.addEventListener(
       cast.framework.system.EventType.VISIBILITY_CHANGED,
@@ -43,7 +436,7 @@
       }
     );
 
-    context.start({ disableIdleTimeout: true });
+    context.start();
   </script>
 </body>
 </html>

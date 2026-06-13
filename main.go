@@ -29,6 +29,7 @@ func main() {
 	http.HandleFunc(config.Settings.CastURL, twitchEndpoint.CastTwitch)
 	http.HandleFunc("/stop-cast/", twitchEndpoint.StopCast)
 	http.HandleFunc("/stop-cast", twitchEndpoint.StopCast)
+	http.HandleFunc("/stream-info/", twitchEndpoint.StreamInfo)
 	http.HandleFunc("/stream/", twitchEndpoint.StreamProxy)
 
 	// Serve ffmpeg-generated HLS files for mpegTS devices (Google TV).

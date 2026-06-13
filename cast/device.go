@@ -96,23 +96,31 @@ func LaunchApp(ipAddress, appID string) (*Session, error) {
 }
 
 // Load sends a LOAD command and closes the connection. Playback continues on
-// the Cast device after the connection is closed.
-func (s *Session) Load(url, contentType, streamType string) error {
+// the Cast device after the connection is closed. If meta is non-nil its
+// title/game are embedded in the media metadata so the CAF seek bar displays
+// them; the login is passed via customData for receiver-side polling.
+func (s *Session) Load(url, contentType, streamType string, meta *MediaMeta) error {
 	defer s.dev.conn.Close()
 
 	if err := s.dev.send(senderID, s.transportID, nsConn, `{"type":"CONNECT"}`); err != nil {
 		return fmt.Errorf("CONNECT transport: %w", err)
 	}
 
+	item := mediaItem{
+		ContentID:   url,
+		ContentType: contentType,
+		StreamType:  streamType,
+	}
+	if meta != nil {
+		item.Metadata = &mediaMetadata{MetadataType: 0, Title: meta.Title, Subtitle: meta.Game}
+		item.CustomData = &mediaCustomData{Login: meta.Login, Resolution: meta.Resolution, FPS: meta.FPS}
+	}
+
 	load, _ := json.Marshal(loadMsg{
 		Type:      "LOAD",
 		RequestID: 2,
 		Autoplay:  true,
-		Media: mediaItem{
-			ContentID:   url,
-			ContentType: contentType,
-			StreamType:  streamType,
-		},
+		Media:     item,
 	})
 	if err := s.dev.send(senderID, s.transportID, nsMedia, string(load)); err != nil {
 		return fmt.Errorf("LOAD: %w", err)
@@ -124,12 +132,12 @@ func (s *Session) Load(url, contentType, streamType string) error {
 // loadMedia connects to the Chromecast at ipAddress, launches appID, and sends
 // a LOAD command for the given URL. The connection is closed once the LOAD is
 // sent, which does not interrupt playback on the receiver.
-func loadMedia(ipAddress, appID, url, contentType, streamType string) error {
+func loadMedia(ipAddress, appID, url, contentType, streamType string, meta *MediaMeta) error {
 	session, err := LaunchApp(ipAddress, appID)
 	if err != nil {
 		return err
 	}
-	return session.Load(url, contentType, streamType)
+	return session.Load(url, contentType, streamType, meta)
 }
 
 // waitForApp reads messages until RECEIVER_STATUS shows appID running, then

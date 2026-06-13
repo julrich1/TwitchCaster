@@ -35,7 +35,23 @@ var (
 
 	hlsAccessMu   sync.Mutex
 	hlsLastAccess = make(map[string]time.Time) // keyed by Chromecast IP
+
+	castGenMu sync.Mutex
+	castGens  = make(map[string]uint64) // keyed by Chromecast IP
 )
+
+func bumpCastGen(ip string) uint64 {
+	castGenMu.Lock()
+	defer castGenMu.Unlock()
+	castGens[ip]++
+	return castGens[ip]
+}
+
+func isCastGenCurrent(ip string, gen uint64) bool {
+	castGenMu.Lock()
+	defer castGenMu.Unlock()
+	return castGens[ip] == gen
+}
 
 // RecordHLSAccess notes that the given hlsID (e.g. "192-168-1-233") was just served.
 func RecordHLSAccess(hlsID string) {
@@ -91,11 +107,19 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("Cast request: %s → %s (%s)\n", streamID, deviceName, ipAddress)
 
+	meta := &cast.MediaMeta{Login: streamID}
+	if title, game, err := t.twitchService.FetchStreamByLogin(streamID); err == nil && title != "" {
+		meta.Title = title
+		meta.Game = game
+	}
+
+	gen := bumpCastGen(ipAddress)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
 	go func() {
-		if err := proxyAndCast(streamID, quality, appID, ipAddress, t.serverPort, t.serverBaseURL); err != nil {
+		if err := proxyAndCast(streamID, quality, appID, ipAddress, t.serverPort, t.serverBaseURL, meta, gen); err != nil {
 			fmt.Printf("Error casting %s to %s: %v\n", streamID, ipAddress, err)
 		}
 	}()
@@ -107,7 +131,7 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 //   - Default receiver, direct H264 HLS (non-CMAF): cast directly.
 //   - Default receiver, CMAF: HLS file proxy (mpegTS repack via ffmpeg).
 //   - Fallback: streamlink HTTP proxy delivering raw fMP4 as video/mp4.
-func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, serverBaseURL string) error {
+func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, serverBaseURL string, meta *cast.MediaMeta, gen uint64) error {
 	qualityArg := streamlinkQualityArg(quality)
 	customReceiver := appID != "" && appID != "CC1AD845"
 
@@ -128,11 +152,12 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		// Start proxy and Chromecast app launch concurrently.
 		var proxyErr, launchErr error
 		var session *cast.Session
+		var proxyQuality string
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			proxyErr = startDeviceHLSProxy(streamID, qualityArg, ipAddress)
+			proxyQuality, proxyErr = startDeviceHLSProxy(streamID, qualityArg, ipAddress, gen)
 		}()
 		go func() {
 			defer wg.Done()
@@ -150,18 +175,29 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 			killProxy(ipAddress)
 			return launchErr
 		}
+		// Abort if a newer cast request has already taken over this device.
+		if !isCastGenCurrent(ipAddress, gen) {
+			session.Close()
+			return nil
+		}
+		if meta != nil && proxyQuality != "" {
+			meta.Resolution, meta.FPS = parseResolution(proxyQuality)
+		}
 		fmt.Printf("[%s] Casting %s via HLS file proxy (custom receiver)\n", ipAddress, streamID)
-		return session.Load(castURL, "application/x-mpegURL", "LIVE")
+		return session.Load(castURL, "application/x-mpegURL", "LIVE", meta)
 	}
 
 	if hlsURL, resolvedQuality, err := resolveStream(streamID, qualityArg, "--twitch-supported-codecs", "h264"); err == nil {
+		if meta != nil && resolvedQuality != "" {
+			meta.Resolution, meta.FPS = parseResolution(resolvedQuality)
+		}
 		cmaf, _ := isCMAFManifest(hlsURL)
 		if !cmaf {
 			killProxy(ipAddress)
 			fmt.Printf("[%s] Casting %s via direct HLS [%s]\n", ipAddress, streamID, resolvedQuality)
-			return cast.URL(hlsURL, ipAddress, "application/x-mpegURL", "LIVE", appID)
+			return cast.URL(hlsURL, ipAddress, "application/x-mpegURL", "LIVE", appID, meta)
 		}
-		if err := startDeviceHLSProxy(streamID, qualityArg, ipAddress); err != nil {
+		if _, err := startDeviceHLSProxy(streamID, qualityArg, ipAddress, gen); err != nil {
 			return err
 		}
 		localIP, err := getLocalIP()
@@ -171,7 +207,7 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		}
 		castURL := fmt.Sprintf("http://%s:%d/hls-files/%s/index.m3u8", localIP, serverPort, strings.ReplaceAll(ipAddress, ".", "-"))
 		fmt.Printf("[%s] Casting %s via HLS file proxy [%s]\n", ipAddress, streamID, resolvedQuality)
-		return cast.URL(castURL, ipAddress, "application/x-mpegURL", "LIVE", appID)
+		return cast.URL(castURL, ipAddress, "application/x-mpegURL", "LIVE", appID, meta)
 	}
 
 	if _, err := startDeviceProxy(streamID, qualityArg, ipAddress); err != nil {
@@ -184,22 +220,22 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 	}
 	streamURL := fmt.Sprintf("http://%s:%d/stream/%s", localIP, serverPort, ipAddress)
 	fmt.Printf("[%s] Casting %s via stream proxy\n", ipAddress, streamID)
-	return cast.URL(streamURL, ipAddress, "video/mp4", "BUFFERED", appID)
+	return cast.URL(streamURL, ipAddress, "video/mp4", "BUFFERED", appID, meta)
 }
 
 // startDeviceHLSProxy pipes streamlink → ffmpeg to produce a live TS-based HLS
 // stream written to /tmp/tc-hls/<device>/. The Chromecast fetches the files
 // through our /hls-files/ static server. No CMAF markers in the manifest means
 // the Cast receiver accepts it and ExoPlayer uses HlsMediaSource.
-func startDeviceHLSProxy(streamID, qualityArg, ipAddress string) error {
+func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (resolvedQuality string, err error) {
 	streamProxyMu.Lock()
 	killExistingProxy(ipAddress)
 	streamProxyMu.Unlock()
 
 	hlsDir := filepath.Join(os.TempDir(), "tc-hls", strings.ReplaceAll(ipAddress, ".", "-"))
 	os.RemoveAll(hlsDir)
-	if err := os.MkdirAll(hlsDir, 0755); err != nil {
-		return fmt.Errorf("create HLS dir: %w", err)
+	if err = os.MkdirAll(hlsDir, 0755); err != nil {
+		return "", fmt.Errorf("create HLS dir: %w", err)
 	}
 	hlsManifest := filepath.Join(hlsDir, "index.m3u8")
 
@@ -224,44 +260,52 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string) error {
 		hlsManifest,
 	)
 
-	slOut, err := slCmd.StdoutPipe()
-	if err != nil {
+	slOut, slOutErr := slCmd.StdoutPipe()
+	if slOutErr != nil {
 		os.RemoveAll(hlsDir)
-		return err
+		return "", slOutErr
 	}
 	ffCmd.Stdin = slOut
 
-	slStderr, err := slCmd.StderrPipe()
-	if err != nil {
+	slStderr, slStderrErr := slCmd.StderrPipe()
+	if slStderrErr != nil {
 		os.RemoveAll(hlsDir)
-		return err
+		return "", slStderrErr
 	}
-	ffStderr, err := ffCmd.StderrPipe()
-	if err != nil {
+	ffStderr, ffStderrErr := ffCmd.StderrPipe()
+	if ffStderrErr != nil {
 		os.RemoveAll(hlsDir)
-		return err
+		return "", ffStderrErr
 	}
 
-	if err := slCmd.Start(); err != nil {
+	if startErr := slCmd.Start(); startErr != nil {
 		os.RemoveAll(hlsDir)
-		return fmt.Errorf("streamlink start failed: %w", err)
+		return "", fmt.Errorf("streamlink start failed: %w", startErr)
 	}
 	fmt.Printf("[%s] streamlink started (pid %d): %s\n", ipAddress, slCmd.Process.Pid, strings.Join(slCmd.Args, " "))
 
-	if err := ffCmd.Start(); err != nil {
+	if startErr := ffCmd.Start(); startErr != nil {
 		slCmd.Process.Kill()
 		_ = slCmd.Wait()
 		os.RemoveAll(hlsDir)
-		return fmt.Errorf("ffmpeg start failed: %w", err)
+		return "", fmt.Errorf("ffmpeg start failed: %w", startErr)
 	}
 	fmt.Printf("[%s] ffmpeg started (pid %d): %s\n", ipAddress, ffCmd.Process.Pid, strings.Join(ffCmd.Args, " "))
 
+	// Capture the resolved quality from the "Opening stream: 1080p60 (HLS)" log line.
+	qualityCh := make(chan string, 1)
 	go func() {
 		scanner := bufio.NewScanner(slStderr)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if strings.Contains(line, "Opening stream") || strings.Contains(line, "rror") {
 				fmt.Printf("streamlink [%s]: %s\n", ipAddress, line)
+			}
+			if q := parseStreamQuality(line); q != "unknown" {
+				select {
+				case qualityCh <- q:
+				default:
+				}
 			}
 		}
 	}()
@@ -275,6 +319,14 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string) error {
 	// Wait up to 15s for ffmpeg to write the manifest and at least one segment.
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
+		if !isCastGenCurrent(ipAddress, gen) {
+			// A newer cast request has taken over; leave the directory alone.
+			slCmd.Process.Kill()
+			ffCmd.Process.Kill()
+			_ = slCmd.Wait()
+			_ = ffCmd.Wait()
+			return "", fmt.Errorf("cast superseded for %s", ipAddress)
+		}
 		if _, statErr := os.Stat(hlsManifest); statErr == nil {
 			if segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.ts")); len(segs) > 0 {
 				break
@@ -287,8 +339,18 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string) error {
 		ffCmd.Process.Kill()
 		_ = slCmd.Wait()
 		_ = ffCmd.Wait()
-		os.RemoveAll(hlsDir)
-		return fmt.Errorf("HLS segments not ready within 15s for %s", ipAddress)
+		// Only remove the directory if we still own it — a newer proxy may have
+		// already claimed this path.
+		if isCastGenCurrent(ipAddress, gen) {
+			os.RemoveAll(hlsDir)
+		}
+		return "", fmt.Errorf("HLS segments not ready within 15s for %s", ipAddress)
+	}
+
+	// Read whatever quality the streamlink stderr goroutine captured (non-blocking).
+	select {
+	case resolvedQuality = <-qualityCh:
+	default:
 	}
 
 	streamProxyMu.Lock()
@@ -334,7 +396,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string) error {
 		streamProxyMu.Unlock()
 	}()
 
-	return nil
+	return resolvedQuality, nil
 }
 
 // startDeviceProxy kills any existing proxy for the device, allocates a free
@@ -580,6 +642,25 @@ func resolveStream(streamID, qualityArg string, extraArgs ...string) (url, quali
 	return "", "", fmt.Errorf("no stream available for %s at quality %s", streamID, qualityArg)
 }
 
+// parseResolution converts a streamlink quality name (e.g. "1080p60") into
+// display-ready resolution and fps strings for the receiver overlay.
+func parseResolution(q string) (resolution, fps string) {
+	parts := strings.SplitN(q, "p", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	heightStr, fpsStr := parts[0], parts[1]
+	widths := map[string]string{"1080": "1920", "720": "1280", "480": "854", "360": "640", "160": "284"}
+	w, ok := widths[heightStr]
+	if !ok {
+		return "", ""
+	}
+	if fpsStr == "" {
+		fpsStr = "30"
+	}
+	return w + "×" + heightStr, fpsStr + "fps"
+}
+
 func parseStreamQuality(s string) string {
 	for _, line := range strings.Split(s, "\n") {
 		if idx := strings.Index(line, "Opening stream: "); idx >= 0 {
@@ -693,6 +774,24 @@ func (t *TwitchEndpoint) StopCast(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Stop cast request for %s\n", ip)
 	killProxy(ip)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// StreamInfo returns the current title and game for a streamer as JSON.
+// The receiver calls this every 60 seconds to keep the seek-bar metadata fresh.
+func (t *TwitchEndpoint) StreamInfo(w http.ResponseWriter, r *http.Request) {
+	login := strings.TrimPrefix(r.URL.Path, "/stream-info/")
+	if login == "" {
+		http.Error(w, "missing login", http.StatusBadRequest)
+		return
+	}
+	fmt.Printf("[stream-info] polling %s\n", login)
+	title, game, err := t.twitchService.FetchStreamByLogin(login)
+	if err != nil {
+		http.Error(w, "upstream error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"title": title, "game": game})
 }
 
 // TwitchChannelList is the entry point for an HTTP channel list request

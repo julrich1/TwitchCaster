@@ -1,5 +1,14 @@
 package cast
 
+// MediaMeta carries stream metadata to include in the Cast LOAD command.
+type MediaMeta struct {
+	Title      string
+	Game       string
+	Login      string // streamer login, passed to receiver for polling
+	Resolution string // e.g. "1920×1080", derived server-side from resolved quality
+	FPS        string // e.g. "60fps"
+}
+
 // msgType is used to peek at the "type" field of any incoming Cast message.
 type msgType struct {
 	Type string `json:"type"`
@@ -20,9 +29,23 @@ type loadMsg struct {
 }
 
 type mediaItem struct {
-	ContentID   string `json:"contentId"`
-	ContentType string `json:"contentType"`
-	StreamType  string `json:"streamType"`
+	ContentID   string           `json:"contentId"`
+	ContentType string           `json:"contentType"`
+	StreamType  string           `json:"streamType"`
+	Metadata    *mediaMetadata   `json:"metadata,omitempty"`
+	CustomData  *mediaCustomData `json:"customData,omitempty"`
+}
+
+type mediaMetadata struct {
+	MetadataType int    `json:"metadataType"` // 0 = GenericMediaMetadata
+	Title        string `json:"title"`
+	Subtitle     string `json:"subtitle"`
+}
+
+type mediaCustomData struct {
+	Login      string `json:"login"`
+	Resolution string `json:"resolution,omitempty"`
+	FPS        string `json:"fps,omitempty"`
 }
 
 type receiverStatusMsg struct {
