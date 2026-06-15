@@ -108,9 +108,10 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Cast request: %s → %s (%s)\n", streamID, deviceName, ipAddress)
 
 	meta := &cast.MediaMeta{Login: streamID}
-	if title, game, err := t.twitchService.FetchStreamByLogin(streamID); err == nil && title != "" {
+	if title, game, viewerCount, err := t.twitchService.FetchStreamByLogin(streamID); err == nil && title != "" {
 		meta.Title = title
 		meta.Game = game
+		meta.ViewerCount = viewerCount
 	}
 
 	gen := bumpCastGen(ipAddress)
@@ -785,13 +786,13 @@ func (t *TwitchEndpoint) StreamInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Printf("[stream-info] polling %s\n", login)
-	title, game, err := t.twitchService.FetchStreamByLogin(login)
+	title, game, viewerCount, err := t.twitchService.FetchStreamByLogin(login)
 	if err != nil {
 		http.Error(w, "upstream error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"title": title, "game": game})
+	json.NewEncoder(w).Encode(map[string]interface{}{"title": title, "game": game, "viewerCount": viewerCount})
 }
 
 // TwitchChannelList is the entry point for an HTTP channel list request

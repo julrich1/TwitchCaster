@@ -113,7 +113,7 @@ func (s *Session) Load(url, contentType, streamType string, meta *MediaMeta) err
 	}
 	if meta != nil {
 		item.Metadata = &mediaMetadata{MetadataType: 0, Title: meta.Title, Subtitle: meta.Game}
-		item.CustomData = &mediaCustomData{Login: meta.Login, Resolution: meta.Resolution, FPS: meta.FPS}
+		item.CustomData = &mediaCustomData{Login: meta.Login, Resolution: meta.Resolution, FPS: meta.FPS, ViewerCount: meta.ViewerCount}
 	}
 
 	load, _ := json.Marshal(loadMsg{

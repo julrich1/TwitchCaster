@@ -100,17 +100,17 @@ func (t *TwitchService) fetchUsers(onlineUsers models.OnlineUsersResponse) (mode
 	return usersResponse, nil
 }
 
-// FetchStreamByLogin returns the current title and game for a single stream
-// identified by the streamer's login name. Returns empty strings if the stream
-// is offline or the login is not found.
-func (t *TwitchService) FetchStreamByLogin(login string) (title, game string, err error) {
+// FetchStreamByLogin returns the current title, game, and viewer count for a
+// single stream identified by the streamer's login name. Returns empty strings
+// and zero if the stream is offline or the login is not found.
+func (t *TwitchService) FetchStreamByLogin(login string) (title, game string, viewerCount int, err error) {
 	var resp models.OnlineUsersResponse
 	ep := endpoints["TWITCH_STREAMS"]
 
 	headers := map[string]string{}
 	t.appendCommonHeaders(headers)
 	if err = t.appendTwitchAuthHeader(headers); err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 
 	req := Request{ep.method, ep.url, headers, map[string][]string{
@@ -118,13 +118,13 @@ func (t *TwitchService) FetchStreamByLogin(login string) (title, game string, er
 		"first":      {"1"},
 	}}
 	if err = MakeRequest(req, &resp); err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 	if len(resp.Data) == 0 {
-		return "", "", nil
+		return "", "", 0, nil
 	}
 	d := resp.Data[0]
-	return d.Title, d.GameName, nil
+	return d.Title, d.GameName, d.ViewerCount, nil
 }
 
 func (t *TwitchService) appendTwitchAuthHeader(headers map[string]string) error {
