@@ -256,7 +256,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 		"-f", "hls",
 		"-hls_segment_type", "mpegts", // force TS segments, no EXT-X-MAP
 		"-hls_time", "2",
-		"-hls_list_size", "10",
+		"-hls_list_size", "60",
 		"-hls_flags", "delete_segments",
 		hlsManifest,
 	)
@@ -381,18 +381,43 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 				killProxy(ipAddress)
 				return
 			}
+			segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.ts"))
+			if len(segs) > 0 {
+				var newest time.Time
+				for _, seg := range segs {
+					if info, statErr := os.Stat(seg); statErr == nil && info.ModTime().After(newest) {
+						newest = info.ModTime()
+					}
+				}
+				if age := time.Since(newest); age > 15*time.Second {
+					fmt.Printf("[%s] WARNING: newest HLS segment is %s old — possible pipeline stall\n", ipAddress, age.Round(time.Second))
+				}
+			}
+		}
+	}()
+
+	// ffmpeg watcher: detects ffmpeg dying before streamlink (pipeline stall scenario).
+	go func() {
+		err := ffCmd.Wait()
+		streamProxyMu.Lock()
+		p, ok := streamProxies[ipAddress]
+		current := ok && p.cmd == slCmd
+		streamProxyMu.Unlock()
+		if current {
+			fmt.Printf("[%s] ffmpeg exited unexpectedly: %v\n", ipAddress, err)
+			slCmd.Process.Kill()
 		}
 	}()
 
 	go func() {
-		_ = slCmd.Wait()
+		err := slCmd.Wait()
 		ffCmd.Process.Kill()
-		_ = ffCmd.Wait()
+		// ffmpeg goroutine owns ffCmd.Wait(); don't call it here.
 		streamProxyMu.Lock()
 		if p, ok := streamProxies[ipAddress]; ok && p.cmd == slCmd {
 			delete(streamProxies, ipAddress)
 			os.RemoveAll(hlsDir)
-			fmt.Printf("HLS proxy for %s exited\n", ipAddress)
+			fmt.Printf("[%s] streamlink exited: %v\n", ipAddress, err)
 		}
 		streamProxyMu.Unlock()
 	}()

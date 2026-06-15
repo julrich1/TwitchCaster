@@ -54,8 +54,22 @@ func main() {
 		}
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Cache-Control", "no-cache, no-store")
-		http.StripPrefix("/hls-files/", http.FileServer(http.Dir(hlsRoot))).ServeHTTP(w, r)
+		cw := &captureStatus{ResponseWriter: w}
+		http.StripPrefix("/hls-files/", http.FileServer(http.Dir(hlsRoot))).ServeHTTP(cw, r)
+		if cw.status == http.StatusNotFound {
+			log.Printf("HLS 404: %s", r.URL.Path)
+		}
 	}))
 
 	log.Fatal(http.ListenAndServe(":3010", nil))
+}
+
+type captureStatus struct {
+	http.ResponseWriter
+	status int
+}
+
+func (c *captureStatus) WriteHeader(code int) {
+	c.status = code
+	c.ResponseWriter.WriteHeader(code)
 }
