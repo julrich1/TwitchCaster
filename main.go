@@ -20,9 +20,12 @@ func main() {
 
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/receiver", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Receiver page loaded from %s", r.RemoteAddr)
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFile(w, r, "static/receiver.html")
 	})
+	http.HandleFunc("/current-stream/", twitchEndpoint.CurrentStream)
+	http.HandleFunc("/receiver-session/", twitchEndpoint.ReceiverSession)
 	http.HandleFunc("/auth/twitch", authEndpoint.OAuthRedirect)
 	http.HandleFunc("/oauth", authEndpoint.OAuthCallback)
 	http.HandleFunc(config.Settings.ChannelListURL, twitchEndpoint.TwitchChannelList)
@@ -63,6 +66,7 @@ func main() {
 
 	log.Fatal(http.ListenAndServe(":3010", nil))
 }
+
 
 type captureStatus struct {
 	http.ResponseWriter

@@ -55,6 +55,7 @@ func (d *device) send(sourceID, destID, namespace, payload string) error {
 type Session struct {
 	dev         *device
 	transportID string
+	SessionID   string
 }
 
 // Close closes the underlying connection without sending a LOAD command.
@@ -80,19 +81,25 @@ func LaunchApp(ipAddress, appID string) (*Session, error) {
 		return nil, fmt.Errorf("CONNECT: %w", err)
 	}
 
-	launch, _ := json.Marshal(launchMsg{Type: "LAUNCH", RequestID: 1, AppID: appID})
+	// Stop any backgrounded session so the next LAUNCH brings the app to the
+	// foreground rather than reusing the existing session invisibly.
+	stop, _ := json.Marshal(launchMsg{Type: "STOP", RequestID: 1})
+	d.send(senderID, receiverID, nsReceiver, string(stop))
+	time.Sleep(300 * time.Millisecond)
+
+	launch, _ := json.Marshal(launchMsg{Type: "LAUNCH", RequestID: 2, AppID: appID})
 	if err := d.send(senderID, receiverID, nsReceiver, string(launch)); err != nil {
 		d.conn.Close()
 		return nil, fmt.Errorf("LAUNCH: %w", err)
 	}
 
-	transportID, err := d.waitForApp(appID, 60*time.Second)
+	transportID, sessionID, err := d.waitForApp(appID, 60*time.Second)
 	if err != nil {
 		d.conn.Close()
 		return nil, fmt.Errorf("waiting for %s to launch: %w", appID, err)
 	}
 
-	return &Session{dev: d, transportID: transportID}, nil
+	return &Session{dev: d, transportID: transportID, SessionID: sessionID}, nil
 }
 
 // Load sends a LOAD command and closes the connection. Playback continues on
@@ -144,7 +151,7 @@ func loadMedia(ipAddress, appID, url, contentType, streamType string, meta *Medi
 // returns its transportId. PING messages are answered with PONG inline.
 // GET_STATUS is polled every 5s because the Chromecast does not always send
 // unsolicited RECEIVER_STATUS updates while a custom receiver is loading.
-func (d *device) waitForApp(appID string, timeout time.Duration) (string, error) {
+func (d *device) waitForApp(appID string, timeout time.Duration) (transportID, sessionID string, err error) {
 	d.conn.SetReadDeadline(time.Now().Add(timeout))
 
 	done := make(chan struct{})
@@ -166,9 +173,10 @@ func (d *device) waitForApp(appID string, timeout time.Duration) (string, error)
 	}()
 
 	for {
-		msg, err := readMessage(d.conn)
+		var msg castMessage
+		msg, err = readMessage(d.conn)
 		if err != nil {
-			return "", fmt.Errorf("read: %w", err)
+			return "", "", fmt.Errorf("read: %w", err)
 		}
 
 		if msg.namespace == nsHeartbeat {
@@ -186,17 +194,17 @@ func (d *device) waitForApp(appID string, timeout time.Duration) (string, error)
 
 		var t msgType
 		if json.Unmarshal([]byte(msg.payload), &t) == nil && t.Type == "LAUNCH_ERROR" {
-			return "", fmt.Errorf("LAUNCH_ERROR from Chromecast: %s", msg.payload)
+			return "", "", fmt.Errorf("LAUNCH_ERROR from Chromecast: %s", msg.payload)
 		}
 
 		var status receiverStatusMsg
-		if err := json.Unmarshal([]byte(msg.payload), &status); err != nil || status.Type != "RECEIVER_STATUS" {
+		if err = json.Unmarshal([]byte(msg.payload), &status); err != nil || status.Type != "RECEIVER_STATUS" {
 			continue
 		}
 
 		for _, app := range status.Status.Applications {
 			if app.AppID == appID && app.TransportID != "" {
-				return app.TransportID, nil
+				return app.TransportID, app.SessionID, nil
 			}
 		}
 	}

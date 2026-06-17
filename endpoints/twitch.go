@@ -38,7 +38,22 @@ var (
 
 	castGenMu sync.Mutex
 	castGens  = make(map[string]uint64) // keyed by Chromecast IP
+
+	currentStreamMu sync.Mutex
+	currentStreams   = make(map[string]*streamState) // keyed by hlsID
+
+	sessionMu  sync.Mutex
+	sessionMap = make(map[string]string) // Cast sessionID → hlsID
 )
+
+type streamState struct {
+	Seq         uint64 `json:"seq"`
+	URL         string `json:"url"`
+	Login       string `json:"login"`
+	Resolution  string `json:"resolution,omitempty"`
+	FPS         string `json:"fps,omitempty"`
+	ViewerCount int    `json:"viewerCount,omitempty"`
+}
 
 func bumpCastGen(ip string) uint64 {
 	castGenMu.Lock()
@@ -184,8 +199,24 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		if meta != nil && proxyQuality != "" {
 			meta.Resolution, meta.FPS = parseResolution(proxyQuality)
 		}
-		fmt.Printf("[%s] Casting %s via HLS file proxy (custom receiver)\n", ipAddress, streamID)
-		return session.Load(castURL, "application/x-mpegURL", "LIVE", meta)
+		state := &streamState{Seq: gen, URL: castURL}
+		if meta != nil {
+			state.Login = meta.Login
+			state.Resolution = meta.Resolution
+			state.FPS = meta.FPS
+			state.ViewerCount = meta.ViewerCount
+		}
+		currentStreamMu.Lock()
+		currentStreams[hlsID] = state
+		currentStreamMu.Unlock()
+		if session.SessionID != "" {
+			sessionMu.Lock()
+			sessionMap[session.SessionID] = hlsID
+			sessionMu.Unlock()
+		}
+		fmt.Printf("[%s] Casting %s via HLS file proxy (custom receiver, session=%s)\n", ipAddress, streamID, session.SessionID)
+		session.Close()
+		return nil
 	}
 
 	if hlsURL, resolvedQuality, err := resolveStream(streamID, qualityArg, "--twitch-supported-codecs", "h264"); err == nil {
@@ -249,12 +280,12 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 		qualityArg,
 	)
 	ffCmd := exec.Command("ffmpeg",
-		"-loglevel", "warning", // global option must precede -i
+		"-loglevel", "error", // global option must precede -i
 		"-i", "pipe:0",
 		"-c", "copy",
-		"-bsf:v", "h264_mp4toannexb", // convert AVCC→Annex B for MPEG-TS container
+		"-bsf:a", "aac_adtstoasc", // convert ADTS→MPEG-4 ASC for MP4 container
 		"-f", "hls",
-		"-hls_segment_type", "mpegts", // force TS segments, no EXT-X-MAP
+		"-hls_segment_type", "fmp4",
 		"-hls_time", "2",
 		"-hls_list_size", "60",
 		"-hls_flags", "delete_segments",
@@ -317,7 +348,11 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 		}
 	}()
 
-	// Wait up to 15s for ffmpeg to write the manifest and at least one segment.
+	// Wait up to 15s for ffmpeg to produce at least 5 segments (~10s of buffer).
+	// The initial streamlink burst (3 pre-fetched Twitch segments) typically
+	// delivers these in 2–3s, so startup only increases by ~2s over the 1-segment
+	// threshold while eliminating the buffer-starvation stutter at playback start.
+	const minSegments = 5
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if !isCastGenCurrent(ipAddress, gen) {
@@ -329,13 +364,13 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 			return "", fmt.Errorf("cast superseded for %s", ipAddress)
 		}
 		if _, statErr := os.Stat(hlsManifest); statErr == nil {
-			if segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.ts")); len(segs) > 0 {
+			if segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.m4s")); len(segs) >= minSegments {
 				break
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.ts")); len(segs) == 0 {
+	if segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.m4s")); len(segs) == 0 {
 		slCmd.Process.Kill()
 		ffCmd.Process.Kill()
 		_ = slCmd.Wait()
@@ -381,7 +416,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 				killProxy(ipAddress)
 				return
 			}
-			segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.ts"))
+			segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.m4s"))
 			if len(segs) > 0 {
 				var newest time.Time
 				for _, seg := range segs {
@@ -418,6 +453,10 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 			delete(streamProxies, ipAddress)
 			os.RemoveAll(hlsDir)
 			fmt.Printf("[%s] streamlink exited: %v\n", ipAddress, err)
+			hlsID := strings.ReplaceAll(ipAddress, ".", "-")
+			currentStreamMu.Lock()
+			delete(currentStreams, hlsID)
+			currentStreamMu.Unlock()
 		}
 		streamProxyMu.Unlock()
 	}()
@@ -800,6 +839,47 @@ func (t *TwitchEndpoint) StopCast(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Stop cast request for %s\n", ip)
 	killProxy(ip)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// CurrentStream returns the active stream state for a device as JSON, or 204
+// if nothing is currently casting. The native receiver polls this every 2s to
+// know when to start (or switch) playback.
+func (t *TwitchEndpoint) CurrentStream(w http.ResponseWriter, r *http.Request) {
+	hlsID := strings.TrimPrefix(r.URL.Path, "/current-stream/")
+	if hlsID == "" {
+		http.Error(w, "missing hlsID", http.StatusBadRequest)
+		return
+	}
+	currentStreamMu.Lock()
+	state, ok := currentStreams[hlsID]
+	currentStreamMu.Unlock()
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(state)
+}
+
+// ReceiverSession maps a Cast session ID to the hlsID of its device. The
+// native receiver calls this on startup (using the session ID from CAF) to
+// discover which device it is without relying on request IP.
+func (t *TwitchEndpoint) ReceiverSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimPrefix(r.URL.Path, "/receiver-session/")
+	if sessionID == "" {
+		http.Error(w, "missing sessionID", http.StatusBadRequest)
+		return
+	}
+	sessionMu.Lock()
+	hlsID, ok := sessionMap[sessionID]
+	sessionMu.Unlock()
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	fmt.Printf("[receiver-session] %s → %s\n", sessionID, hlsID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"hlsID": hlsID})
 }
 
 // StreamInfo returns the current title and game for a streamer as JSON.

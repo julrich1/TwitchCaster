@@ -9,7 +9,18 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; background: #070710; overflow: hidden; }
-    cast-media-player { display: block; width: 100%; height: 100%; position: relative; z-index: 1; }
+
+    #player {
+      display: none;
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      background: #000;
+      object-fit: contain;
+      z-index: 1;
+    }
+    #player.active { display: block; }
 
     /* ── Idle screen ── */
     #idle-screen {
@@ -250,7 +261,7 @@
       text-transform: uppercase;
     }
 
-    /* ── Quality overlay (shown with seek bar) ── */
+    /* ── Quality overlay (shown on keypress) ── */
     #quality-overlay {
       display: none;
       position: fixed;
@@ -275,35 +286,57 @@
       letter-spacing: .08em;
     }
 
-    /* ── Viewer count overlay (always visible while playing) ── */
-    #viewer-overlay {
+    /* ── Stream metadata (bottom left, always visible while playing) ── */
+    #meta-overlay {
       display: none;
       position: fixed;
-      top: 52px;
+      bottom: 52px;
       left: 60px;
       z-index: 3;
-      align-items: center;
+      flex-direction: column;
       gap: 8px;
+      max-width: 680px;
     }
-    #viewer-dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 50%;
-      background: #ff4040;
-      box-shadow: 0 0 8px rgba(255,64,64,.8), 0 0 18px rgba(255,64,64,.4);
-      flex-shrink: 0;
-    }
-    #viewer-count {
+    #meta-streamer {
+      display: flex;
+      align-items: center;
+      gap: 10px;
       font-family: 'Orbitron', monospace;
-      font-size: 18px;
+      font-size: 15px;
       font-weight: 700;
       color: #fff;
-      text-shadow: 0 0 16px rgba(255,255,255,.3);
+      text-shadow: 0 1px 8px rgba(0,0,0,.8);
+      letter-spacing: .06em;
+    }
+    #meta-live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ff4040;
+      box-shadow: 0 0 6px rgba(255,64,64,.9), 0 0 14px rgba(255,64,64,.4);
+      flex-shrink: 0;
+    }
+    #meta-title {
+      font-family: 'Exo 2', sans-serif;
+      font-size: 22px;
+      font-weight: 300;
+      color: rgba(255,255,255,.92);
+      text-shadow: 0 1px 8px rgba(0,0,0,.8);
+      line-height: 1.3;
+    }
+    #meta-game {
+      font-family: 'Exo 2', sans-serif;
+      font-size: 14px;
+      font-weight: 200;
+      color: #c084fc;
+      text-shadow: 0 1px 6px rgba(0,0,0,.8);
       letter-spacing: .04em;
     }
   </style>
 </head>
 <body>
+
+  <video id="player" autoplay playsinline></video>
 
   <div id="idle-screen">
     <div class="idle-aurora"></div>
@@ -341,21 +374,276 @@
     <span id="quality-fps"></span>
   </div>
 
-  <div id="viewer-overlay">
-    <div id="viewer-dot"></div>
-    <span id="viewer-count"></span>
+  <div id="meta-overlay">
+    <div id="meta-streamer">
+      <div id="meta-live-dot"></div>
+      <span id="meta-streamer-text"></span>
+    </div>
+    <div id="meta-title"></div>
+    <div id="meta-game"></div>
   </div>
 
-  <cast-media-player></cast-media-player>
-
   <script>
-    var context = cast.framework.CastReceiverContext.getInstance();
-    var playerManager = context.getPlayerManager();
-    var deviceHlsId = null;
+    var deviceHlsId = '';
+
+    var video = document.getElementById('player');
     var streamLogin = null;
     var pollingInterval = null;
     var qualityOverlayTimer = null;
     var currentViewerCount = 0;
+    var activeStreamURL = null;
+
+    // ── HLS / MSE player ────────────────────────────────────────────────────
+
+    var mediaSource = null;
+    var sourceBuffer = null;
+    var initSegmentURL = null;
+    var seenSequences = new Set();
+    var hlsLoopTimer = null;
+    var hlsGen = 0;
+    var appending = false;
+    var appendQueue = [];
+
+    function resetPlayer() {
+      hlsGen++;
+      if (hlsLoopTimer) { clearTimeout(hlsLoopTimer); hlsLoopTimer = null; }
+      if (mediaSource && mediaSource.readyState === 'open') {
+        try { mediaSource.endOfStream(); } catch(e) {}
+      }
+      mediaSource = null;
+      sourceBuffer = null;
+      initSegmentURL = null;
+      seenSequences = new Set();
+      appending = false;
+      appendQueue = [];
+      video.src = '';
+    }
+
+    function drainQueue() {
+      if (appending || appendQueue.length === 0 || !sourceBuffer || sourceBuffer.updating) return;
+      appending = true;
+      var buf = appendQueue.shift();
+      try {
+        sourceBuffer.appendBuffer(buf);
+      } catch(e) {
+        appending = false;
+      }
+    }
+
+    function startHLS(manifestURL) {
+      resetPlayer();
+      var gen = hlsGen;
+      mediaSource = new MediaSource();
+      video.src = URL.createObjectURL(mediaSource);
+
+      mediaSource.addEventListener('sourceopen', function() {
+        if (gen !== hlsGen) return;
+        // Twitch delivers H.264 + AAC; try High profile first, fall back to Baseline.
+        var codecs = 'avc1.64001F, mp4a.40.2';
+        if (!MediaSource.isTypeSupported('video/mp4; codecs="' + codecs + '"')) {
+          codecs = 'avc1.42E01E, mp4a.40.2';
+        }
+        try {
+          sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="' + codecs + '"');
+        } catch(e) {
+          console.error('addSourceBuffer failed:', e);
+          return;
+        }
+        sourceBuffer.mode = 'segments';
+        sourceBuffer.addEventListener('updateend', function() {
+          appending = false;
+          pruneBuffer();
+          drainQueue();
+        });
+        hlsLoop(manifestURL, gen);
+      });
+    }
+
+    function pruneBuffer() {
+      if (!sourceBuffer || sourceBuffer.updating || !video.buffered.length) return;
+      var behind = video.currentTime - 30;
+      if (behind > 0 && video.buffered.start(0) < behind) {
+        try { sourceBuffer.remove(0, behind); } catch(e) {}
+      }
+    }
+
+    function hlsLoop(manifestURL, gen) {
+      if (gen !== hlsGen) return;
+      fetchManifest(manifestURL).then(function(segments) {
+        if (gen !== hlsGen) return;
+        // Only consider the last 10 segments (~20s) to stay near the live edge
+        // and avoid fetching minutes of backlog on initial load.
+        var window = segments.slice(Math.max(0, segments.length - 10));
+        var pending = window.filter(function(s) { return !seenSequences.has(s.seq); });
+        if (pending.length === 0) {
+          hlsLoopTimer = setTimeout(function() { hlsLoop(manifestURL, gen); }, 2000);
+          return;
+        }
+        fetchAndAppend(pending, gen, function() {
+          if (gen !== hlsGen) return;
+          // Poll sooner after appending — the next segment may be nearly ready.
+          hlsLoopTimer = setTimeout(function() { hlsLoop(manifestURL, gen); }, 800);
+        });
+      }).catch(function() {
+        if (gen !== hlsGen) return;
+        hlsLoopTimer = setTimeout(function() { hlsLoop(manifestURL, gen); }, 3000);
+      });
+    }
+
+    // Fetch all pending segments in parallel, then append in sequence order.
+    function fetchAndAppend(segments, gen, done) {
+      var promises = segments.map(function(seg) {
+        return fetch(seg.url)
+          .then(function(r) { return r.arrayBuffer(); })
+          .then(function(buf) { return { seq: seg.seq, buf: new Uint8Array(buf) }; })
+          .catch(function() { return { seq: seg.seq, buf: null }; });
+      });
+      Promise.all(promises).then(function(results) {
+        if (gen !== hlsGen) return;
+        results.forEach(function(r) {
+          seenSequences.add(r.seq);
+          if (r.buf) appendQueue.push(r.buf);
+        });
+        drainQueue();
+        done();
+      });
+    }
+
+    // Returns [{seq, url}] for segments not yet seen, after fetching init if needed.
+    function fetchManifest(manifestURL) {
+      return fetch(manifestURL + '?_=' + Date.now())
+        .then(function(r) {
+          if (!r.ok) throw new Error('manifest ' + r.status);
+          return r.text();
+        })
+        .then(function(text) {
+          var base = manifestURL.substring(0, manifestURL.lastIndexOf('/') + 1);
+          var lines = text.split('\n');
+          var seq = 0;
+          var segments = [];
+          var mapURI = null;
+
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i].trim();
+            if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
+              seq = parseInt(line.split(':')[1], 10);
+            } else if (line.startsWith('#EXT-X-MAP:URI="')) {
+              mapURI = line.match(/#EXT-X-MAP:URI="([^"]+)"/)[1];
+              if (!mapURI.startsWith('http')) mapURI = base + mapURI;
+            } else if (line && !line.startsWith('#')) {
+              var url = line.startsWith('http') ? line : base + line;
+              segments.push({ seq: seq, url: url });
+              seq++;
+            }
+          }
+
+          // Fetch and prepend init segment the first time we see it.
+          if (mapURI && mapURI !== initSegmentURL) {
+            initSegmentURL = mapURI;
+            return fetch(mapURI)
+              .then(function(r) { return r.arrayBuffer(); })
+              .then(function(buf) {
+                appendQueue.unshift(new Uint8Array(buf));
+                drainQueue();
+                return segments;
+              });
+          }
+          return segments;
+        });
+    }
+
+    // ── Stream state polling ─────────────────────────────────────────────────
+
+    var streamPollTimer = null;
+    var activeStreamSeq = 0;
+    var pollFailures = 0;
+
+    function startStreamPoll() {
+      if (!deviceHlsId) return;
+      pollCurrentStream();
+    }
+
+    function pollCurrentStream() {
+      fetch('/current-stream/' + deviceHlsId)
+        .then(function(r) {
+          pollFailures = 0;
+          if (r.status === 204) {
+            if (activeStreamURL !== null) showIdleScreen();
+            streamPollTimer = setTimeout(pollCurrentStream, 2000);
+            return null;
+          }
+          return r.json();
+        })
+        .then(function(data) {
+          if (!data) return;
+          if (data.seq !== activeStreamSeq) {
+            activeStreamSeq = data.seq;
+            activeStreamURL = data.url;
+            streamLogin = data.login || null;
+            onStreamStart(data);
+          }
+          streamPollTimer = setTimeout(pollCurrentStream, 2000);
+        })
+        .catch(function() {
+          pollFailures++;
+          if (pollFailures >= 3 && activeStreamURL !== null) showIdleScreen();
+          streamPollTimer = setTimeout(pollCurrentStream, 3000);
+        });
+    }
+
+    function onStreamStart(data) {
+      document.getElementById('idle-screen').style.display = 'none';
+      video.classList.add('active');
+      if (data.resolution) document.getElementById('quality-res').textContent = data.resolution;
+      if (data.fps) document.getElementById('quality-fps').textContent = data.fps;
+      setViewerCount(data.viewerCount || 0);
+      updateMetaStreamer();
+
+      startHLS(data.url);
+      startStreamInfoPolling();
+      showOverlays();
+    }
+
+    function showIdleScreen() {
+      resetPlayer();
+      activeStreamURL = null;
+      activeStreamSeq = 0;
+      pollFailures = 0;
+      streamLogin = null;
+      currentViewerCount = 0;
+      video.classList.remove('active');
+      document.getElementById('idle-screen').style.display = '';
+      document.getElementById('meta-overlay').style.display = 'none';
+      document.getElementById('quality-overlay').style.display = 'none';
+      document.getElementById('meta-title').textContent = '';
+      document.getElementById('meta-game').textContent = '';
+      document.getElementById('meta-streamer-text').textContent = '';
+      if (qualityOverlayTimer) { clearTimeout(qualityOverlayTimer); qualityOverlayTimer = null; }
+      if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+    }
+
+    // ── Stream info polling (metadata) ───────────────────────────────────────
+
+    function fetchStreamInfo() {
+      if (!streamLogin) return;
+      fetch('/stream-info/' + streamLogin)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.viewerCount) setViewerCount(data.viewerCount);
+          if (data.title !== undefined) document.getElementById('meta-title').textContent = data.title;
+          if (data.game !== undefined) document.getElementById('meta-game').textContent = data.game;
+          updateMetaStreamer();
+        })
+        .catch(function() {});
+    }
+
+    function startStreamInfoPolling() {
+      if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+      fetchStreamInfo();
+      pollingInterval = setInterval(fetchStreamInfo, 60000);
+    }
+
+    // ── Overlays ─────────────────────────────────────────────────────────────
 
     function formatViewerCount(n) {
       if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
@@ -365,131 +653,94 @@
 
     function setViewerCount(n) {
       currentViewerCount = n;
-      if (n) document.getElementById('viewer-count').textContent = formatViewerCount(n);
     }
 
-    playerManager.setMessageInterceptor(
-      cast.framework.messages.MessageType.LOAD,
-      function(loadRequestData) {
-        var match = loadRequestData.media.contentId.match(/\/hls-files\/([^/]+)\//);
-        if (match) deviceHlsId = match[1];
+    function updateMetaStreamer() {
+      var name = streamLogin || '';
+      var viewers = currentViewerCount ? ' - ' + formatViewerCount(currentViewerCount) + ' viewers' : '';
+      document.getElementById('meta-streamer-text').textContent = name + viewers;
+    }
 
-        var custom = loadRequestData.media.customData;
-        if (custom && custom.login) {
-          streamLogin = custom.login;
-          startStreamInfoPolling();
-        }
-        if (custom && custom.resolution) {
-          document.getElementById('quality-res').textContent = custom.resolution;
-          document.getElementById('quality-fps').textContent = custom.fps || '';
-        } else {
-          document.getElementById('quality-res').textContent = '';
-          document.getElementById('quality-fps').textContent = '';
-        }
-        setViewerCount(custom && custom.viewerCount ? custom.viewerCount : 0);
-
-        document.getElementById('idle-screen').style.display = 'none';
-        return loadRequestData;
-      }
-    );
-
-    function showQualityOverlay() {
-      if (!document.getElementById('quality-res').textContent) return;
+    function showOverlays() {
       var qEl = document.getElementById('quality-overlay');
-      var vEl = document.getElementById('viewer-overlay');
-      qEl.style.display = 'flex';
-      if (currentViewerCount) vEl.style.display = 'flex';
+      var mEl = document.getElementById('meta-overlay');
+      if (document.getElementById('quality-res').textContent) qEl.style.display = 'flex';
+      if (activeStreamURL) mEl.style.display = 'flex';
       if (qualityOverlayTimer) clearTimeout(qualityOverlayTimer);
       qualityOverlayTimer = setTimeout(function() {
         qEl.style.display = 'none';
-        vEl.style.display = 'none';
+        mEl.style.display = 'none';
         qualityOverlayTimer = null;
       }, 5000);
     }
 
-    // Show overlay whenever the seek bar appears.
+    // ── Remote control ───────────────────────────────────────────────────────
 
-    // Cast protocol messages (pause/play/seek from phone/app remote).
-    [
-      cast.framework.messages.MessageType.PAUSE,
-      cast.framework.messages.MessageType.PLAY,
-      cast.framework.messages.MessageType.SEEK,
-      cast.framework.messages.MessageType.GET_STATUS,
-    ].forEach(function(type) {
-      try {
-        playerManager.setMessageInterceptor(type, function(req) {
-          showQualityOverlay();
-          return req;
-        });
-      } catch(e) {}
-    });
-
-    // Physical remote button presses arrive as keydown events. Use capture phase
-    // so we see them before cast-media-player can stop propagation.
-    window.addEventListener('keydown', showQualityOverlay, true);
-
-    // cast-media-player changes attributes (e.g. player state) when seek bar
-    // appears — observe those changes as an additional trigger.
-    try {
-      var cmpEl = document.querySelector('cast-media-player');
-      if (cmpEl) {
-        new MutationObserver(showQualityOverlay).observe(cmpEl, { attributes: true });
+    window.addEventListener('keydown', function(e) {
+      showOverlays();
+      if (e.key === 'MediaPlayPause' || e.key === 'k') {
+        video.paused ? video.play() : video.pause();
       }
-    } catch(e) {}
+    }, true);
 
-    function showIdleScreen() {
-      document.getElementById('idle-screen').style.display = '';
-      document.getElementById('quality-overlay').style.display = 'none';
-      document.getElementById('viewer-overlay').style.display = 'none';
-      if (qualityOverlayTimer) { clearTimeout(qualityOverlayTimer); qualityOverlayTimer = null; }
-      if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
-      currentViewerCount = 0;
-      streamLogin = null;
-    }
+    // ── Stop on visibility change (TV off / input switch) ────────────────────
 
-    try {
-      playerManager.addEventListener(cast.framework.events.EventType.ENDED, showIdleScreen);
-      playerManager.addEventListener(cast.framework.events.EventType.ERROR, showIdleScreen);
-    } catch(e) {}
-
-    function startStreamInfoPolling() {
-      if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
-      pollingInterval = setInterval(function() {
-        if (!streamLogin) return;
-        fetch('/stream-info/' + streamLogin)
-          .then(function(r) { return r.json(); })
-          .then(function(data) {
-            if (data.viewerCount) setViewerCount(data.viewerCount);
-            var info = playerManager.getMediaInformation();
-            if (!info) return;
-            var meta = info.metadata || new cast.framework.messages.GenericMediaMetadata();
-            if (data.title !== meta.title || data.game !== meta.subtitle) {
-              meta.title = data.title;
-              meta.subtitle = data.game;
-              info.metadata = meta;
-              playerManager.setMediaInformation(info, false);
-            }
-          })
-          .catch(function() {});
-      }, 60000);
-    }
-
-    context.addEventListener(
-      cast.framework.system.EventType.VISIBILITY_CHANGED,
-      function(event) {
-        if (!event.isVisible) {
-          playerManager.stop();
-          var url = '/stop-cast' + (deviceHlsId ? '/' + deviceHlsId : '');
-          if (typeof navigator.sendBeacon === 'function') {
-            navigator.sendBeacon(url);
-          } else {
-            fetch(url, { method: 'POST' }).catch(function() {});
-          }
+    document.addEventListener('visibilitychange', function() {
+      if (document.hidden && deviceHlsId) {
+        var url = '/stop-cast/' + deviceHlsId;
+        if (typeof navigator.sendBeacon === 'function') {
+          navigator.sendBeacon(url);
+        } else {
+          fetch(url, { method: 'POST' }).catch(function() {});
         }
       }
-    );
+    });
 
-    context.start();
+    // ── Boot ─────────────────────────────────────────────────────────────────
+
+    var bootStarted = false;
+    function boot() {
+      if (bootStarted) return;
+      bootStarted = true;
+      try {
+        var ctx = cast.framework.CastReceiverContext.getInstance();
+        var appData = ctx.getApplicationData();
+        if (appData && appData.sessionId) {
+          identifyAndStart(appData.sessionId);
+          return;
+        }
+      } catch(e) {}
+      startStreamPoll();
+    }
+
+    var identifyDeadline = 0;
+    function identifyAndStart(sessionId) {
+      if (!identifyDeadline) identifyDeadline = Date.now() + 30000;
+      fetch('/receiver-session/' + sessionId)
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(data) {
+          if (data && data.hlsID) {
+            deviceHlsId = data.hlsID;
+            startStreamPoll();
+          } else if (Date.now() < identifyDeadline) {
+            setTimeout(function() { identifyAndStart(sessionId); }, 500);
+          }
+        })
+        .catch(function() {
+          if (Date.now() < identifyDeadline) {
+            setTimeout(function() { identifyAndStart(sessionId); }, 1000);
+          }
+        });
+    }
+
+    try {
+      var castCtx = cast.framework.CastReceiverContext.getInstance();
+      castCtx.addEventListener(cast.framework.system.EventType.READY, boot);
+      castCtx.start({ disableIdleTimeout: true });
+    } catch(e) {}
+
+    // Fallback in case READY never fires.
+    setTimeout(boot, 5000);
   </script>
 </body>
 </html>

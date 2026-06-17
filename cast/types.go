@@ -61,5 +61,6 @@ type receiverStatus struct {
 
 type application struct {
 	AppID       string `json:"appId"`
+	SessionID   string `json:"sessionId"`
 	TransportID string `json:"transportId"`
 }
