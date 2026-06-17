@@ -430,7 +430,16 @@
       }
     }
 
-    function startHLS(manifestURL) {
+    function codecString(codec) {
+      if (codec === 'av01')       return 'av01.0.12M.08, mp4a.40.2';
+      if (codec === 'hev1')       return 'hev1.1.6.L150.B0, mp4a.40.2';
+      if (codec === 'hvc1')       return 'hvc1.1.6.L150.B0, mp4a.40.2';
+      if (codec === 'av1')        return 'av01.0.12M.08, mp4a.40.2';  // legacy
+      if (codec === 'hevc')       return 'hev1.1.6.L150.B0, mp4a.40.2'; // legacy
+      return 'avc1.64001F, mp4a.40.2'; // h264 default
+    }
+
+    function startHLS(manifestURL, codec) {
       resetPlayer();
       var gen = hlsGen;
       mediaSource = new MediaSource();
@@ -438,10 +447,9 @@
 
       mediaSource.addEventListener('sourceopen', function() {
         if (gen !== hlsGen) return;
-        // Twitch delivers H.264 + AAC; try High profile first, fall back to Baseline.
-        var codecs = 'avc1.64001F, mp4a.40.2';
+        var codecs = codecString(codec);
         if (!MediaSource.isTypeSupported('video/mp4; codecs="' + codecs + '"')) {
-          codecs = 'avc1.42E01E, mp4a.40.2';
+          codecs = 'avc1.42E01E, mp4a.40.2'; // baseline fallback
         }
         try {
           sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="' + codecs + '"');
@@ -599,7 +607,7 @@
       setViewerCount(data.viewerCount || 0);
       updateMetaStreamer();
 
-      startHLS(data.url);
+      startHLS(data.url, data.codec);
       startStreamInfoPolling();
       showOverlays();
     }

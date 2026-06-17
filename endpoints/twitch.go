@@ -53,6 +53,7 @@ type streamState struct {
 	Resolution  string `json:"resolution,omitempty"`
 	FPS         string `json:"fps,omitempty"`
 	ViewerCount int    `json:"viewerCount,omitempty"`
+	Codec       string `json:"codec,omitempty"` // "h264", "av1", "hevc"
 }
 
 func bumpCastGen(ip string) uint64 {
@@ -199,7 +200,10 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		if meta != nil && proxyQuality != "" {
 			meta.Resolution, meta.FPS = parseResolution(proxyQuality)
 		}
-		state := &streamState{Seq: gen, URL: castURL}
+		hlsDir := filepath.Join(os.TempDir(), "tc-hls", hlsID)
+		detectedCodec := detectVideoCodec(hlsDir)
+		fmt.Printf("[%s] Detected codec: %q\n", ipAddress, detectedCodec)
+		state := &streamState{Seq: gen, URL: castURL, Codec: detectedCodec}
 		if meta != nil {
 			state.Login = meta.Login
 			state.Resolution = meta.Resolution
@@ -271,14 +275,17 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 	}
 	hlsManifest := filepath.Join(hlsDir, "index.m3u8")
 
-	slCmd := exec.Command("streamlink",
+	slArgs := []string{
 		"--stdout",
 		"--hls-segment-stream-data",
 		"--hls-live-edge=3",
 		"--stream-segment-threads=2",
-		"twitch.tv/"+streamID,
-		qualityArg,
-	)
+		"--twitch-supported-codecs", "av1,h265,h264",
+		"--twitch-access-token-param", "playerType=site",
+		"--webbrowser-headless=true", // needed when auth triggers CI token via Chromium
+	}
+	slArgs = append(slArgs, "twitch.tv/"+streamID, qualityArg)
+	slCmd := exec.Command("streamlink", slArgs...)
 	ffCmd := exec.Command("ffmpeg",
 		"-loglevel", "error", // global option must precede -i
 		"-i", "pipe:0",
@@ -715,7 +722,7 @@ func parseResolution(q string) (resolution, fps string) {
 		return "", ""
 	}
 	heightStr, fpsStr := parts[0], parts[1]
-	widths := map[string]string{"1080": "1920", "720": "1280", "480": "854", "360": "640", "160": "284"}
+	widths := map[string]string{"2160": "3840", "1440": "2560", "1080": "1920", "720": "1280", "480": "854", "360": "640", "160": "284"}
 	w, ok := widths[heightStr]
 	if !ok {
 		return "", ""
@@ -880,6 +887,28 @@ func (t *TwitchEndpoint) ReceiverSession(w http.ResponseWriter, r *http.Request)
 	fmt.Printf("[receiver-session] %s → %s\n", sessionID, hlsID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"hlsID": hlsID})
+}
+
+// detectVideoCodec runs ffprobe on the fMP4 init segment to return the codec
+// name ("h264", "av1", "hevc", …). Returns "" on any error.
+func detectVideoCodec(hlsDir string) string {
+	inits, _ := filepath.Glob(filepath.Join(hlsDir, "init*.mp4"))
+	if len(inits) == 0 {
+		return ""
+	}
+	// codec_tag_string gives us "hev1"/"hvc1"/"avc1"/"av01" — the exact fMP4 box
+	// type needed to construct the MSE addSourceBuffer codec string.
+	out, err := exec.Command("ffprobe",
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=codec_tag_string",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		inits[0],
+	).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // StreamInfo returns the current title and game for a streamer as JSON.
