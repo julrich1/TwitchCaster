@@ -122,15 +122,17 @@ type TwitchEndpoint struct {
 	twitchService *services.TwitchService
 	serverPort    int
 	serverBaseURL string // external HTTPS base URL, used by custom receivers to avoid CORS
+	tokenMonitor  *TokenMonitor
 }
 
 // NewTwitchEndpoint creates a new TwitchEndpoint object
-func NewTwitchEndpoint(config models.Configuration, authManager *auth.Manager) *TwitchEndpoint {
+func NewTwitchEndpoint(config models.Configuration, authManager *auth.Manager, tokenMonitor *TokenMonitor) *TwitchEndpoint {
 	twitchEndpoint := TwitchEndpoint{}
 	twitchEndpoint.chromecasts = config.Chromecasts
 	twitchEndpoint.twitchService = services.NewTwitchService(config.Settings, authManager)
 	twitchEndpoint.serverPort = config.Settings.Port
 	twitchEndpoint.serverBaseURL = config.Settings.BaseURL
+	twitchEndpoint.tokenMonitor = tokenMonitor
 	return &twitchEndpoint
 }
 
@@ -1139,6 +1141,7 @@ type channelListStreamer struct {
 type channelListData struct {
 	Chromecasts []models.Chromecast
 	Streamers   []channelListStreamer
+	TokenAlert  string // non-empty → warning banner at the top of the page
 }
 
 // TwitchChannelList is the entry point for an HTTP channel list request
@@ -1162,6 +1165,14 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 	}
 
 	data := channelListData{Chromecasts: t.chromecasts}
+	if t.tokenMonitor != nil {
+		switch t.tokenMonitor.Status().State {
+		case TokenInvalid:
+			data.TokenAlert = "Streamlink token is invalid — casts will get ads and lose enhanced streams. Update it."
+		case TokenMissing:
+			data.TokenAlert = "No streamlink token configured — casts will get ads and lose enhanced streams. Set one up."
+		}
+	}
 	for _, user := range onlineStreamers {
 		data.Streamers = append(data.Streamers, channelListStreamer{
 			OnlineStreamer:     user,

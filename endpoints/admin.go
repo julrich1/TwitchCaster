@@ -9,6 +9,16 @@ import (
 	"strings"
 )
 
+// AdminEndpoint serves the streamlink-token admin page.
+type AdminEndpoint struct {
+	monitor *TokenMonitor
+}
+
+// NewAdminEndpoint creates the admin endpoint backed by the shared token monitor.
+func NewAdminEndpoint(monitor *TokenMonitor) *AdminEndpoint {
+	return &AdminEndpoint{monitor: monitor}
+}
+
 func streamlinkConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -17,28 +27,35 @@ func streamlinkConfigPath() (string, error) {
 	return filepath.Join(home, ".config", "streamlink", "config.twitch"), nil
 }
 
-func StreamlinkTokenPage(w http.ResponseWriter, r *http.Request) {
+func (a *AdminEndpoint) StreamlinkTokenPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		updateStreamlinkToken(w, r)
+		a.updateStreamlinkToken(w, r)
 		return
 	}
 
-	configPath, err := streamlinkConfigPath()
-	configured := err == nil
-	if configured {
-		_, err = os.Stat(configPath)
-		configured = err == nil
+	status := a.monitor.Status()
+	statusHTML := `<span style="color:#e44">Not configured</span>`
+	switch status.State {
+	case TokenValid:
+		statusHTML = fmt.Sprintf(`<span style="color:#4e4">Valid — logged in as %s</span> <span style="color:#666">(checked %s)</span>`,
+			status.Login, status.CheckedAt.Format("Jan 2 15:04"))
+	case TokenInvalid:
+		statusHTML = fmt.Sprintf(`<span style="color:#e44">Invalid — Twitch rejected the token</span> <span style="color:#666">(checked %s)</span>`,
+			status.CheckedAt.Format("Jan 2 15:04"))
+	case TokenUnknown:
+		statusHTML = `<span style="color:#aa4">Not checked yet</span>`
 	}
 
-	updated := r.URL.Query().Get("updated") == "1"
-
-	status := `<span style="color:#e44">Not configured</span>`
-	if configured {
-		status = `<span style="color:#4e4">Token configured</span>`
-	}
 	banner := ""
-	if updated {
-		banner = `<p style="color:#4e4;margin-bottom:1em">Token updated successfully. Next cast will use the new token.</p>`
+	switch {
+	case r.URL.Query().Get("updated") != "1":
+		// no banner
+	case r.URL.Query().Get("valid") == "1":
+		banner = fmt.Sprintf(`<p style="color:#4e4;margin-bottom:1em">Token verified — logged in as %s. Next cast will use it.</p>`, status.Login)
+	case r.URL.Query().Get("valid") == "0":
+		banner = `<p style="color:#e44;margin-bottom:1em">Token saved, but Twitch rejected it — double-check you copied the full auth-token cookie value.</p>`
+	default:
+		banner = `<p style="color:#aa4;margin-bottom:1em">Token saved, but the verification check could not reach Twitch. It will be re-checked at midnight.</p>`
 	}
 
 	fmt.Fprintf(w, `<!DOCTYPE html>
@@ -79,10 +96,10 @@ func StreamlinkTokenPage(w http.ResponseWriter, r *http.Request) {
     </ol>
   </details>
 </body>
-</html>`, status, banner)
+</html>`, statusHTML, banner)
 }
 
-func updateStreamlinkToken(w http.ResponseWriter, r *http.Request) {
+func (a *AdminEndpoint) updateStreamlinkToken(w http.ResponseWriter, r *http.Request) {
 	// Session cookies are SameSite=Lax, but reject cross-site POSTs explicitly
 	// in case an older browser ignores that attribute.
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
@@ -118,5 +135,14 @@ func updateStreamlinkToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[admin] streamlink token updated")
-	http.Redirect(w, r, "/admin/streamlink-token?updated=1", http.StatusSeeOther)
+
+	// Verify the new token right away so a bad paste is caught on the spot.
+	valid := "" // unknown (check couldn't reach Twitch)
+	switch a.monitor.CheckNow().State {
+	case TokenValid:
+		valid = "1"
+	case TokenInvalid:
+		valid = "0"
+	}
+	http.Redirect(w, r, "/admin/streamlink-token?updated=1&valid="+valid, http.StatusSeeOther)
 }

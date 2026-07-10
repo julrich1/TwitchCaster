@@ -21,8 +21,11 @@ func main() {
 	config := config.Load()
 
 	authManager := auth.NewManager(config.Settings)
-	twitchEndpoint := endpoints.NewTwitchEndpoint(config, authManager)
+	tokenMonitor := endpoints.NewTokenMonitor()
+	tokenMonitor.StartDailyCheck()
+	twitchEndpoint := endpoints.NewTwitchEndpoint(config, authManager, tokenMonitor)
 	authEndpoint := endpoints.NewAuthEndpoint(config, authManager)
+	adminEndpoint := endpoints.NewAdminEndpoint(tokenMonitor)
 	session := endpoints.NewSessionAuth(config.Settings.AdminPassword)
 
 	// Endpoints the Chromecast receiver fetches stay unauthenticated; the
@@ -36,7 +39,7 @@ func main() {
 	http.HandleFunc("/current-stream/", twitchEndpoint.CurrentStream)
 	http.HandleFunc("/receiver-session/", twitchEndpoint.ReceiverSession)
 	http.HandleFunc("/login", session.Login)
-	http.HandleFunc("/admin/streamlink-token", session.Protect(endpoints.StreamlinkTokenPage))
+	http.HandleFunc("/admin/streamlink-token", session.Protect(adminEndpoint.StreamlinkTokenPage))
 	http.HandleFunc("/auth/twitch", session.Protect(authEndpoint.OAuthRedirect))
 	http.HandleFunc("/oauth", authEndpoint.OAuthCallback)
 	http.HandleFunc(config.Settings.ChannelListURL, session.Protect(twitchEndpoint.TwitchChannelList))
