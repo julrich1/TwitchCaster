@@ -640,6 +640,13 @@ func killExistingProxy(ipAddress string) {
 			os.RemoveAll(p.hlsDir)
 		}
 		delete(streamProxies, ipAddress)
+		// Clear the current stream state so the receiver gets a 204 and stops
+		// its HLS polling loop. Without this the receiver keeps requesting
+		// index.m3u8 forever against a directory that no longer exists.
+		hlsID := strings.ReplaceAll(ipAddress, ".", "-")
+		currentStreamMu.Lock()
+		delete(currentStreams, hlsID)
+		currentStreamMu.Unlock()
 	}
 }
 
