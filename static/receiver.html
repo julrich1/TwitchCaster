@@ -336,7 +336,8 @@
 </head>
 <body>
 
-  <video id="player" autoplay playsinline></video>
+  <!-- No autoplay: playback is buffer-gated in JS (see maybeStartPlayback). -->
+  <video id="player" playsinline></video>
 
   <div id="idle-screen">
     <div class="idle-aurora"></div>
@@ -384,6 +385,13 @@
   </div>
 
   <script>
+    // Jitter cushion: playback starts once this many seconds are buffered.
+    // Raise for more stall protection, lower for faster startup.
+    var START_BUFFER_SECONDS = 8;
+    // Failsafe: start playback after this long even if the buffer never
+    // reaches START_BUFFER_SECONDS (slow/low-fps pipelines).
+    var PLAYBACK_FAILSAFE_MS = 12000;
+
     var deviceHlsId = '';
 
     var video = document.getElementById('player');
@@ -403,10 +411,13 @@
     var hlsGen = 0;
     var appending = false;
     var appendQueue = [];
+    var playbackStarted = false;
+    var playbackFailsafeTimer = null;
 
     function resetPlayer() {
       hlsGen++;
       if (hlsLoopTimer) { clearTimeout(hlsLoopTimer); hlsLoopTimer = null; }
+      if (playbackFailsafeTimer) { clearTimeout(playbackFailsafeTimer); playbackFailsafeTimer = null; }
       if (mediaSource && mediaSource.readyState === 'open') {
         try { mediaSource.endOfStream(); } catch(e) {}
       }
@@ -416,7 +427,31 @@
       seenSequences = new Set();
       appending = false;
       appendQueue = [];
+      playbackStarted = false;
       video.src = '';
+    }
+
+    // ── Buffer-gated playback start ─────────────────────────────────────────
+    // Segments are appended as fast as they arrive, but playback only begins
+    // once START_BUFFER_SECONDS are buffered (or the failsafe fires). This
+    // keeps the jitter cushion while overlapping it with pipeline startup.
+
+    function maybeStartPlayback() {
+      if (playbackStarted || !video.buffered.length) return;
+      var start = video.buffered.start(0);
+      var end = video.buffered.end(video.buffered.length - 1);
+      if (end - start >= START_BUFFER_SECONDS) startPlayback();
+    }
+
+    function startPlayback() {
+      if (playbackStarted) return;
+      playbackStarted = true;
+      if (playbackFailsafeTimer) { clearTimeout(playbackFailsafeTimer); playbackFailsafeTimer = null; }
+      if (video.buffered.length && video.currentTime < video.buffered.start(0)) {
+        try { video.currentTime = video.buffered.start(0); } catch(e) {}
+      }
+      var p = video.play();
+      if (p && p.catch) p.catch(function() {});
     }
 
     function drainQueue() {
@@ -461,10 +496,17 @@
         sourceBuffer.addEventListener('updateend', function() {
           appending = false;
           pruneBuffer();
+          maybeStartPlayback();
           drainQueue();
         });
         hlsLoop(manifestURL, gen);
       });
+
+      playbackFailsafeTimer = setTimeout(function() {
+        if (gen !== hlsGen) return;
+        playbackFailsafeTimer = null;
+        startPlayback();
+      }, PLAYBACK_FAILSAFE_MS);
     }
 
     function pruneBuffer() {
@@ -565,10 +607,21 @@
     var streamPollTimer = null;
     var activeStreamSeq = 0;
     var pollFailures = 0;
+    var fastPollUntil = 0;
 
     function startStreamPoll() {
       if (!deviceHlsId) return;
+      // The receiver was just launched, so a cast is imminent — poll fast to
+      // pick the stream up the moment the server publishes it.
+      fastPollUntil = Date.now() + 30000;
       pollCurrentStream();
+    }
+
+    // 500ms right after boot (discovery latency matters most there), 1s on
+    // the idle screen (fast re-cast pickup), 2s while playing.
+    function pollDelay() {
+      if (Date.now() < fastPollUntil) return 500;
+      return activeStreamURL !== null ? 2000 : 1000;
     }
 
     function pollCurrentStream() {
@@ -577,7 +630,7 @@
           pollFailures = 0;
           if (r.status === 204) {
             if (activeStreamURL !== null) showIdleScreen();
-            streamPollTimer = setTimeout(pollCurrentStream, 2000);
+            streamPollTimer = setTimeout(pollCurrentStream, pollDelay());
             return null;
           }
           return r.json();
@@ -590,7 +643,7 @@
             streamLogin = data.login || null;
             onStreamStart(data);
           }
-          streamPollTimer = setTimeout(pollCurrentStream, 2000);
+          streamPollTimer = setTimeout(pollCurrentStream, pollDelay());
         })
         .catch(function() {
           pollFailures++;

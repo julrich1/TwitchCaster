@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"twitch-caster/auth"
@@ -25,6 +26,29 @@ import (
 )
 
 const proxyBasePort = 50505
+
+const (
+	// Segments required before publishing the stream to the receiver. The
+	// custom receiver applies its own buffer gate before starting playback,
+	// so it only needs enough for codec detection and the first appends; the
+	// default receiver starts playing immediately, so it keeps a bigger head start.
+	customReceiverMinSegments  = 2
+	defaultReceiverMinSegments = 5
+
+	// Auto-recovery tuning for unexpected streamlink exits (custom receiver).
+	maxRecoveryAttempts = 3
+	recoveryRetryDelay  = 2 * time.Second
+	healthyRunReset     = 5 * time.Minute // a proxy that ran this long resets the attempt counter
+)
+
+// hlsProxyOpts controls startDeviceHLSProxy behavior per caller.
+type hlsProxyOpts struct {
+	minSegments int
+	attempt     int // recovery attempt that started this proxy (0 or 1 = fresh)
+	// onUnexpectedExit is invoked (in a new goroutine) when streamlink dies
+	// without being deliberately killed. nil disables recovery.
+	onUnexpectedExit func(nextAttempt int)
+}
 
 type streamProxy struct {
 	cmd       *exec.Cmd
@@ -60,6 +84,15 @@ type streamState struct {
 	FPS         string `json:"fps,omitempty"`
 	ViewerCount int    `json:"viewerCount,omitempty"`
 	Codec       string `json:"codec,omitempty"` // "h264", "av1", "hevc"
+}
+
+// streamSeq feeds streamState.Seq. The receiver treats any change as "new
+// stream, rebuild the player", which is how recovery forces an MSE reset
+// after ffmpeg restarts segment numbering.
+var streamSeq atomic.Uint64
+
+func nextStreamSeq() uint64 {
+	return streamSeq.Add(1)
 }
 
 func bumpCastGen(ip string) uint64 {
@@ -133,32 +166,38 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Cast request: %s → %s (%s)\n", streamID, deviceName, ipAddress)
 
-	meta := &cast.MediaMeta{Login: streamID}
-	if title, game, viewerCount, err := t.twitchService.FetchStreamByLogin(streamID); err == nil && title != "" {
-		meta.Title = title
-		meta.Game = game
-		meta.ViewerCount = viewerCount
-	}
-
 	gen := bumpCastGen(ipAddress)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
 	go func() {
-		if err := proxyAndCast(streamID, quality, appID, ipAddress, t.serverPort, t.serverBaseURL, meta, gen); err != nil {
+		// Metadata is fetched inside proxyAndCast, concurrently with the
+		// proxy/app startup, so it stays off the casting critical path.
+		meta := &cast.MediaMeta{Login: streamID}
+		if err := t.proxyAndCast(streamID, quality, appID, ipAddress, meta, gen); err != nil {
 			log.Printf("Error casting %s to %s: %v\n", streamID, ipAddress, err)
 		}
 	}()
 }
 
+// fetchMetaInto fills title/game/viewer count for the receiver overlay.
+// Best-effort: on error the cast proceeds with just the login.
+func (t *TwitchEndpoint) fetchMetaInto(meta *cast.MediaMeta, streamID string) {
+	if title, game, viewerCount, err := t.twitchService.FetchStreamByLogin(streamID); err == nil && title != "" {
+		meta.Title = title
+		meta.Game = game
+		meta.ViewerCount = viewerCount
+	}
+}
+
 // proxyAndCast casts a Twitch stream to the Chromecast.
 //   - Custom receiver: always HLS file proxy (CORS blocks direct CDN access);
-//     proxy startup and Chromecast app launch run concurrently.
+//     proxy startup, Chromecast app launch, and metadata fetch run concurrently.
 //   - Default receiver, direct H264 HLS (non-CMAF): cast directly.
 //   - Default receiver, CMAF: HLS file proxy (mpegTS repack via ffmpeg).
 //   - Fallback: streamlink HTTP proxy delivering raw fMP4 as video/mp4.
-func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, serverBaseURL string, meta *cast.MediaMeta, gen uint64) error {
+func (t *TwitchEndpoint) proxyAndCast(streamID, quality, appID, ipAddress string, meta *cast.MediaMeta, gen uint64) error {
 	qualityArg := streamlinkQualityArg(quality)
 	customReceiver := appID != "" && appID != "CC1AD845"
 
@@ -166,29 +205,70 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		// Pre-compute the cast URL — derived from device IP, no network calls needed.
 		hlsID := strings.ReplaceAll(ipAddress, ".", "-")
 		var castURL string
-		if serverBaseURL != "" {
-			castURL = fmt.Sprintf("%s/hls-files/%s/index.m3u8", serverBaseURL, hlsID)
+		if t.serverBaseURL != "" {
+			castURL = fmt.Sprintf("%s/hls-files/%s/index.m3u8", t.serverBaseURL, hlsID)
 		} else {
 			localIP, err := getLocalIP()
 			if err != nil {
 				return err
 			}
-			castURL = fmt.Sprintf("http://%s:%d/hls-files/%s/index.m3u8", localIP, serverPort, hlsID)
+			castURL = fmt.Sprintf("http://%s:%d/hls-files/%s/index.m3u8", localIP, t.serverPort, hlsID)
 		}
 
-		// Start proxy and Chromecast app launch concurrently.
+		// recoverStream restarts the pipeline after an unexpected streamlink
+		// exit and republishes the stream with a new Seq so the receiver
+		// rebuilds its player. Attempts are consecutive: a proxy that stays up
+		// ≥healthyRunReset resets the counter (see the exit watcher).
+		var recoverStream func(attempt int)
+		recoverStream = func(attempt int) {
+			if !isCastGenCurrent(ipAddress, gen) {
+				return
+			}
+			if attempt > maxRecoveryAttempts {
+				log.Printf("[%s] giving up on %s after %d recovery attempts", ipAddress, streamID, maxRecoveryAttempts)
+				clearStreamState(hlsID)
+				return
+			}
+			log.Printf("[%s] recovering stream %s (attempt %d/%d)", ipAddress, streamID, attempt, maxRecoveryAttempts)
+			proxyQuality, err := startDeviceHLSProxy(streamID, qualityArg, ipAddress, gen, hlsProxyOpts{
+				minSegments:      customReceiverMinSegments,
+				attempt:          attempt,
+				onUnexpectedExit: recoverStream,
+			})
+			if err != nil {
+				log.Printf("[%s] recovery attempt %d for %s failed: %v", ipAddress, attempt, streamID, err)
+				if !isCastGenCurrent(ipAddress, gen) {
+					return
+				}
+				time.Sleep(recoveryRetryDelay)
+				recoverStream(attempt + 1)
+				return
+			}
+			publishStreamState(hlsID, castURL, ipAddress, proxyQuality, meta)
+			log.Printf("[%s] stream %s recovered", ipAddress, streamID)
+		}
+
+		// Start proxy, Chromecast app launch, and metadata fetch concurrently.
 		var proxyErr, launchErr error
 		var session *cast.Session
 		var proxyQuality string
 		var wg sync.WaitGroup
-		wg.Add(2)
+		wg.Add(3)
 		go func() {
 			defer wg.Done()
-			proxyQuality, proxyErr = startDeviceHLSProxy(streamID, qualityArg, ipAddress, gen)
+			proxyQuality, proxyErr = startDeviceHLSProxy(streamID, qualityArg, ipAddress, gen, hlsProxyOpts{
+				minSegments:      customReceiverMinSegments,
+				attempt:          1,
+				onUnexpectedExit: recoverStream,
+			})
 		}()
 		go func() {
 			defer wg.Done()
 			session, launchErr = cast.LaunchApp(ipAddress, appID)
+		}()
+		go func() {
+			defer wg.Done()
+			t.fetchMetaInto(meta, streamID)
 		}()
 		wg.Wait()
 
@@ -207,22 +287,7 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 			session.Close()
 			return nil
 		}
-		if meta != nil && proxyQuality != "" {
-			meta.Resolution, meta.FPS = parseResolution(proxyQuality)
-		}
-		hlsDir := filepath.Join(os.TempDir(), "tc-hls", hlsID)
-		detectedCodec := detectVideoCodec(hlsDir)
-		log.Printf("[%s] Detected codec: %q\n", ipAddress, detectedCodec)
-		state := &streamState{Seq: gen, URL: castURL, Codec: detectedCodec}
-		if meta != nil {
-			state.Login = meta.Login
-			state.Resolution = meta.Resolution
-			state.FPS = meta.FPS
-			state.ViewerCount = meta.ViewerCount
-		}
-		currentStreamMu.Lock()
-		currentStreams[hlsID] = state
-		currentStreamMu.Unlock()
+		publishStreamState(hlsID, castURL, ipAddress, proxyQuality, meta)
 		if session.SessionID != "" {
 			sessionMu.Lock()
 			sessionMap[session.SessionID] = hlsID
@@ -232,6 +297,8 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		session.Close()
 		return nil
 	}
+
+	t.fetchMetaInto(meta, streamID)
 
 	if hlsURL, resolvedQuality, err := resolveStream(streamID, qualityArg, "--twitch-supported-codecs", "h264"); err == nil {
 		if meta != nil && resolvedQuality != "" {
@@ -243,7 +310,7 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 			log.Printf("[%s] Casting %s via direct HLS [%s]\n", ipAddress, streamID, resolvedQuality)
 			return cast.URL(hlsURL, ipAddress, "application/x-mpegURL", "LIVE", appID, meta)
 		}
-		if _, err := startDeviceHLSProxy(streamID, qualityArg, ipAddress, gen); err != nil {
+		if _, err := startDeviceHLSProxy(streamID, qualityArg, ipAddress, gen, hlsProxyOpts{minSegments: defaultReceiverMinSegments}); err != nil {
 			return err
 		}
 		localIP, err := getLocalIP()
@@ -251,7 +318,7 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 			killProxy(ipAddress)
 			return err
 		}
-		castURL := fmt.Sprintf("http://%s:%d/hls-files/%s/index.m3u8", localIP, serverPort, strings.ReplaceAll(ipAddress, ".", "-"))
+		castURL := fmt.Sprintf("http://%s:%d/hls-files/%s/index.m3u8", localIP, t.serverPort, strings.ReplaceAll(ipAddress, ".", "-"))
 		log.Printf("[%s] Casting %s via HLS file proxy [%s]\n", ipAddress, streamID, resolvedQuality)
 		return cast.URL(castURL, ipAddress, "application/x-mpegURL", "LIVE", appID, meta)
 	}
@@ -264,16 +331,40 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		killProxy(ipAddress)
 		return err
 	}
-	streamURL := fmt.Sprintf("http://%s:%d/stream/%s", localIP, serverPort, ipAddress)
+	streamURL := fmt.Sprintf("http://%s:%d/stream/%s", localIP, t.serverPort, ipAddress)
 	log.Printf("[%s] Casting %s via stream proxy\n", ipAddress, streamID)
 	return cast.URL(streamURL, ipAddress, "video/mp4", "BUFFERED", appID, meta)
+}
+
+// publishStreamState detects the codec, builds the stream state, and makes it
+// visible to the receiver's /current-stream/ poll. Each call gets a fresh Seq,
+// which tells the receiver to (re)build its player. Used by the initial cast
+// and by recovery.
+func publishStreamState(hlsID, castURL, ipAddress, proxyQuality string, meta *cast.MediaMeta) {
+	hlsDir := filepath.Join(os.TempDir(), "tc-hls", hlsID)
+	detectedCodec := detectVideoCodec(hlsDir)
+	log.Printf("[%s] Detected codec: %q", ipAddress, detectedCodec)
+	state := &streamState{Seq: nextStreamSeq(), URL: castURL, Codec: detectedCodec}
+	if meta != nil {
+		if proxyQuality != "" {
+			meta.Resolution, meta.FPS = parseResolution(proxyQuality)
+		}
+		state.Login = meta.Login
+		state.Resolution = meta.Resolution
+		state.FPS = meta.FPS
+		state.ViewerCount = meta.ViewerCount
+	}
+	currentStreamMu.Lock()
+	currentStreams[hlsID] = state
+	currentStreamMu.Unlock()
 }
 
 // startDeviceHLSProxy pipes streamlink → ffmpeg to produce a live TS-based HLS
 // stream written to /tmp/tc-hls/<device>/. The Chromecast fetches the files
 // through our /hls-files/ static server. No CMAF markers in the manifest means
 // the Cast receiver accepts it and ExoPlayer uses HlsMediaSource.
-func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (resolvedQuality string, err error) {
+func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64, opts hlsProxyOpts) (resolvedQuality string, err error) {
+	proxyStart := time.Now()
 	streamProxyMu.Lock()
 	killExistingProxy(ipAddress)
 	streamProxyMu.Unlock()
@@ -388,24 +479,45 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 		}
 	}()
 
-	// Wait up to 15s for ffmpeg to produce at least 5 segments (~10s of buffer).
-	// The initial streamlink burst (3 pre-fetched Twitch segments) typically
-	// delivers these in 2–3s, so startup only increases by ~2s over the 1-segment
-	// threshold while eliminating the buffer-starvation stutter at playback start.
-	const minSegments = 5
+	// Wait up to 15s for ffmpeg to produce opts.minSegments segments plus the
+	// fMP4 init segment (needed for codec detection). The initial streamlink
+	// burst (3 pre-fetched Twitch segments) typically delivers these within a
+	// few seconds. The custom receiver applies its own buffer gate before
+	// starting playback, so publication doesn't need a big head start here.
 	deadline := time.Now().Add(15 * time.Second)
+	slExited := false
 	for time.Now().Before(deadline) {
+		select {
+		case <-slDone:
+			// streamlink died during startup (stream offline, auth failure…).
+			// Fail fast instead of burning the rest of the 15s.
+			slExited = true
+		default:
+		}
+		if slExited {
+			break
+		}
 		if !isCastGenCurrent(ipAddress, gen) {
 			// A newer cast request has taken over; leave the directory alone.
 			killBoth()
 			return "", fmt.Errorf("cast superseded for %s", ipAddress)
 		}
 		if _, statErr := os.Stat(hlsManifest); statErr == nil {
-			if segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.m4s")); len(segs) >= minSegments {
+			segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.m4s"))
+			inits, _ := filepath.Glob(filepath.Join(hlsDir, "init*.mp4"))
+			if len(segs) >= opts.minSegments && len(inits) > 0 {
 				break
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+	if slExited {
+		ffCmd.Process.Kill()
+		<-ffDone
+		if isCastGenCurrent(ipAddress, gen) {
+			os.RemoveAll(hlsDir)
+		}
+		return "", fmt.Errorf("streamlink exited during startup for %s: %v", ipAddress, slExitErr)
 	}
 	if segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.m4s")); len(segs) == 0 {
 		killBoth()
@@ -482,13 +594,30 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 		<-slDone
 		ffCmd.Process.Kill()
 		streamProxyMu.Lock()
-		if p, ok := streamProxies[ipAddress]; ok && p.cmd == slCmd {
+		p, ok := streamProxies[ipAddress]
+		owned := ok && p.cmd == slCmd
+		if owned {
 			delete(streamProxies, ipAddress)
 			os.RemoveAll(hlsDir)
-			log.Printf("[%s] streamlink exited: %v", ipAddress, slExitErr)
-			clearStreamState(strings.ReplaceAll(ipAddress, ".", "-"))
 		}
 		streamProxyMu.Unlock()
+		if !owned {
+			// Deliberate kill: killExistingProxy deregistered us and handles
+			// all cleanup — no recovery.
+			return
+		}
+		log.Printf("[%s] streamlink exited unexpectedly: %v", ipAddress, slExitErr)
+		if opts.onUnexpectedExit != nil && isCastGenCurrent(ipAddress, gen) {
+			// Keep the published stream state: the receiver retries the
+			// (currently 404ing) manifest while we restart the pipeline.
+			nextAttempt := opts.attempt + 1
+			if time.Since(proxyStart) >= healthyRunReset {
+				nextAttempt = 1
+			}
+			go opts.onUnexpectedExit(nextAttempt)
+			return
+		}
+		clearStreamState(strings.ReplaceAll(ipAddress, ".", "-"))
 	}()
 
 	return resolvedQuality, nil
