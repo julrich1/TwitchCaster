@@ -1,8 +1,9 @@
 {
   "settings": {
     "userId": "12345",
-    "twitchClientId": "12345",
-    "twitchSecret": "12345",
+    "twitchClientId": "your-twitch-client-id",
+    "twitchSecret": "your-twitch-client-secret",
+    "adminPassword": "choose-a-strong-password",
     "baseURL": "https://yourdomain.com",
     "channelListURL": "/gui/twitch-channel-list",
     "castURL": "/gui/cast/"
@@ -11,8 +12,8 @@
     {
       "name": "Living Room",
       "ipAddress": "192.168.1.1",
-      "qualityMax": "best"
-      "receiverAppId": "7BB8F04F"
+      "qualityMax": "best",
+      "receiverAppId": "YOUR_RECEIVER_APP_ID"
     },
     {
       "name": "Office",
