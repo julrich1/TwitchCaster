@@ -1,0 +1,46 @@
+<html>
+<head>
+<link rel="stylesheet" type="text/css" href="/static/style.css">
+<link rel="icon" type="image/x-icon" href="/static/favicon.ico"/>
+</head>
+<body>
+<script>
+  function manualCast(element) {
+    const streamer = document.getElementsByName("sname")[0].value
+    castStreamer(streamer, element)
+  }
+  function castStreamer(streamer, element) {
+    const dropDownElement = document.getElementById("device_selection")
+    const ip = dropDownElement.options[dropDownElement.selectedIndex].value
+    fetch('/gui/cast/' + encodeURIComponent(streamer) + '/' + ip).catch(function() {})
+  }
+</script>
+<div class="logoContainer"><img class="logo" src="/static/twitch-logo.png"></div>
+<select id="device_selection">
+{{- range .Chromecasts}}
+  <option value="{{.IPAddress}}">{{.Name}}</option>
+{{- end}}
+</select><br>
+<div class="manualContainer"><input type="text" name="sname"><button onclick="manualCast(this);">Manual Cast</button></div>
+<div class="container">
+{{- range .Streamers}}
+  <div class="streamContainer">
+    <div onclick="castStreamer({{.Login}}, this);" class="thumbnailContainer">
+      <img src="{{.ThumbnailURL}}" class="thumbnailImage">
+      <div class="viewerCountContainer"><div class="viewerCount">{{.ViewerCountDisplay}} viewers</div></div>
+    </div>
+    <div class="streamDetailsContainer">
+      <div class="profileImageContainer">
+        <img src="{{.ProfileImageURL}}" class="profileImage">
+      </div>
+      <div class="textContainer">
+        <h3>{{.Title}}</h3>
+        <h4>{{.Name}}</h4>
+        <h4>{{.Game}}</h4>
+      </div>
+    </div>
+  </div>
+{{- end}}
+</div>
+</body>
+</html>

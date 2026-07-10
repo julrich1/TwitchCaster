@@ -2,6 +2,7 @@ package endpoints
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -82,6 +83,13 @@ func StreamlinkTokenPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func updateStreamlinkToken(w http.ResponseWriter, r *http.Request) {
+	// Session cookies are SameSite=Lax, but reject cross-site POSTs explicitly
+	// in case an older browser ignores that attribute.
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		http.Error(w, "cross-site request rejected", http.StatusForbidden)
+		return
+	}
+
 	token := strings.TrimSpace(r.FormValue("token"))
 	token = strings.TrimPrefix(token, "OAuth ")
 	token = strings.TrimPrefix(token, "oauth:")
@@ -109,6 +117,6 @@ func updateStreamlinkToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Printf("[admin] streamlink token updated\n")
+	log.Printf("[admin] streamlink token updated")
 	http.Redirect(w, r, "/admin/streamlink-token?updated=1", http.StatusSeeOther)
 }

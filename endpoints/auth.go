@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"twitch-caster/auth"
 	"twitch-caster/models"
@@ -18,9 +20,9 @@ const twitchAuthorizeURL = "https://id.twitch.tv/oauth2/authorize"
 const twitchTokenURL = "https://id.twitch.tv/oauth2/token"
 const oauthCallbackPath = "/oauth"
 const oauthScope = "user:read:follows"
+const oauthStateCookie = "tc_oauth_state"
 
-// pendingOAuthState holds the CSRF state token between the redirect and callback.
-var pendingOAuthState string
+var oauthClient = &http.Client{Timeout: 10 * time.Second}
 
 // AuthEndpoint handles the Twitch OAuth flow.
 type AuthEndpoint struct {
@@ -30,24 +32,34 @@ type AuthEndpoint struct {
 	callbackURL    string
 }
 
-// NewAuthEndpoint creates a new AuthEndpoint.
-func NewAuthEndpoint(config models.Configuration) *AuthEndpoint {
+// NewAuthEndpoint creates a new AuthEndpoint using the shared auth manager.
+func NewAuthEndpoint(config models.Configuration, authManager *auth.Manager) *AuthEndpoint {
 	return &AuthEndpoint{
 		settings:       config.Settings,
-		authManager:    auth.NewManager(config.Settings),
+		authManager:    authManager,
 		channelListURL: config.Settings.ChannelListURL,
 		callbackURL:    config.Settings.BaseURL + oauthCallbackPath,
 	}
 }
 
-// OAuthRedirect sends the browser to Twitch's authorization page.
+// OAuthRedirect sends the browser to Twitch's authorization page. The CSRF
+// state token travels in a short-lived cookie so concurrent logins don't
+// clobber each other.
 func (a *AuthEndpoint) OAuthRedirect(w http.ResponseWriter, r *http.Request) {
 	state, err := generateState()
 	if err != nil {
 		http.Error(w, "Failed to generate OAuth state", http.StatusInternalServerError)
 		return
 	}
-	pendingOAuthState = state
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthStateCookie,
+		Value:    state,
+		Path:     oauthCallbackPath,
+		MaxAge:   600,
+		HttpOnly: true,
+		Secure:   requestIsHTTPS(r),
+		SameSite: http.SameSiteLaxMode,
+	})
 
 	params := url.Values{}
 	params.Set("client_id", a.settings.TwitchClientID)
@@ -68,11 +80,12 @@ func (a *AuthEndpoint) OAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	state := r.URL.Query().Get("state")
-	if state == "" || state != pendingOAuthState {
+	stateCookie, cookieErr := r.Cookie(oauthStateCookie)
+	if state == "" || cookieErr != nil || state != stateCookie.Value {
 		http.Error(w, "Invalid OAuth state", http.StatusBadRequest)
 		return
 	}
-	pendingOAuthState = ""
+	http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Path: oauthCallbackPath, MaxAge: -1})
 
 	code := r.URL.Query().Get("code")
 	if code == "" {
@@ -82,7 +95,7 @@ func (a *AuthEndpoint) OAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	token, err := a.exchangeCode(code, a.callbackURL)
 	if err != nil {
-		fmt.Println("OAuth token exchange error:", err)
+		log.Println("OAuth token exchange error:", err)
 		http.Error(w, "Token exchange failed", http.StatusInternalServerError)
 		return
 	}
@@ -99,7 +112,7 @@ func (a *AuthEndpoint) exchangeCode(code, callbackURI string) (string, error) {
 	params.Set("grant_type", "authorization_code")
 	params.Set("redirect_uri", callbackURI)
 
-	resp, err := http.Post(twitchTokenURL, "application/x-www-form-urlencoded", strings.NewReader(params.Encode()))
+	resp, err := oauthClient.Post(twitchTokenURL, "application/x-www-form-urlencoded", strings.NewReader(params.Encode()))
 	if err != nil {
 		return "", err
 	}

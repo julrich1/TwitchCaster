@@ -13,6 +13,7 @@ import (
 const configFileName = "configuration.json"
 const defaultChannelListURL = "/gui/twitch-channel-list"
 const defaultCastURL = "/gui/cast/"
+const defaultPort = 3010
 
 // Load is used to load the configuration file from disk
 func Load() models.Configuration {
@@ -42,6 +43,14 @@ func validateConfig(config *models.Configuration) {
 		config.Settings.TwitchClientID == "" ||
 		config.Settings.TwitchSecret == "" {
 		log.Fatalln("Error in " + configFileName + ", missing required settings")
+	}
+
+	if config.Settings.BaseURL != "" && config.Settings.AdminPassword == "" {
+		log.Fatalln("Error in " + configFileName + ", adminPassword is required when baseURL is set (server is exposed beyond localhost)")
+	}
+
+	if config.Settings.Port == 0 {
+		config.Settings.Port = defaultPort
 	}
 
 	if config.Settings.ChannelListURL == "" {

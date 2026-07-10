@@ -1,6 +1,9 @@
 package services
 
 import (
+	"errors"
+	"net/http"
+
 	"twitch-caster/auth"
 	"twitch-caster/models"
 )
@@ -26,12 +29,25 @@ type TwitchService struct {
 	authManager *auth.Manager
 }
 
-// NewTwitchService creates a new TwitchService object
-func NewTwitchService(settings models.Settings) *TwitchService {
+// NewTwitchService creates a new TwitchService object sharing the given auth
+// manager, so the OAuth user token is visible to every consumer.
+func NewTwitchService(settings models.Settings, authManager *auth.Manager) *TwitchService {
 	twitchService := TwitchService{}
 	twitchService.settings = settings
-	twitchService.authManager = auth.NewManager(settings)
+	twitchService.authManager = authManager
 	return &twitchService
+}
+
+// makeAuthedRequest performs the request and, if Twitch rejects our user
+// token (401), clears it so the GUI falls back into the OAuth flow instead of
+// erroring until restart.
+func (t *TwitchService) makeAuthedRequest(request Request, responseObject interface{}) error {
+	err := MakeRequest(request, responseObject)
+	var reqErr *RequestError
+	if errors.As(err, &reqErr) && reqErr.StatusCode == http.StatusUnauthorized {
+		t.authManager.ClearUserToken()
+	}
+	return err
 }
 
 // HasUserToken reports whether a user-scoped access token is available.
@@ -57,7 +73,7 @@ func (t *TwitchService) FetchFollowedStreams() ([]models.OnlineStreamer, error) 
 	}
 
 	request := Request{endpoint.method, endpoint.url, headers, queryParameters}
-	if err := MakeRequest(request, &followedStreamsResponse); err != nil {
+	if err := t.makeAuthedRequest(request, &followedStreamsResponse); err != nil {
 		return nil, err
 	}
 
@@ -93,7 +109,7 @@ func (t *TwitchService) fetchUsers(onlineUsers models.OnlineUsersResponse) (mode
 	}
 
 	request := Request{endpoint.method, endpoint.url, headers, queryParameters}
-	if err := MakeRequest(request, &usersResponse); err != nil {
+	if err := t.makeAuthedRequest(request, &usersResponse); err != nil {
 		return usersResponse, err
 	}
 
@@ -117,7 +133,7 @@ func (t *TwitchService) FetchStreamByLogin(login string) (title, game string, vi
 		"user_login": {login},
 		"first":      {"1"},
 	}}
-	if err = MakeRequest(req, &resp); err != nil {
+	if err = t.makeAuthedRequest(req, &resp); err != nil {
 		return "", "", 0, err
 	}
 	if len(resp.Data) == 0 {

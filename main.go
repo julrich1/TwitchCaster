@@ -1,13 +1,18 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"mime"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
+	"twitch-caster/auth"
 	"twitch-caster/config"
 	"twitch-caster/endpoints"
 )
@@ -15,9 +20,13 @@ import (
 func main() {
 	config := config.Load()
 
-	twitchEndpoint := endpoints.NewTwitchEndpoint(config, 3010)
-	authEndpoint := endpoints.NewAuthEndpoint(config)
+	authManager := auth.NewManager(config.Settings)
+	twitchEndpoint := endpoints.NewTwitchEndpoint(config, authManager)
+	authEndpoint := endpoints.NewAuthEndpoint(config, authManager)
+	session := endpoints.NewSessionAuth(config.Settings.AdminPassword)
 
+	// Endpoints the Chromecast receiver fetches stay unauthenticated; the
+	// browser-facing GUI/admin routes sit behind the session cookie.
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/receiver", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Receiver page loaded from %s", r.RemoteAddr)
@@ -26,11 +35,12 @@ func main() {
 	})
 	http.HandleFunc("/current-stream/", twitchEndpoint.CurrentStream)
 	http.HandleFunc("/receiver-session/", twitchEndpoint.ReceiverSession)
-	http.HandleFunc("/admin/streamlink-token", endpoints.StreamlinkTokenPage)
-	http.HandleFunc("/auth/twitch", authEndpoint.OAuthRedirect)
+	http.HandleFunc("/login", session.Login)
+	http.HandleFunc("/admin/streamlink-token", session.Protect(endpoints.StreamlinkTokenPage))
+	http.HandleFunc("/auth/twitch", session.Protect(authEndpoint.OAuthRedirect))
 	http.HandleFunc("/oauth", authEndpoint.OAuthCallback)
-	http.HandleFunc(config.Settings.ChannelListURL, twitchEndpoint.TwitchChannelList)
-	http.HandleFunc(config.Settings.CastURL, twitchEndpoint.CastTwitch)
+	http.HandleFunc(config.Settings.ChannelListURL, session.Protect(twitchEndpoint.TwitchChannelList))
+	http.HandleFunc(config.Settings.CastURL, session.Protect(twitchEndpoint.CastTwitch))
 	http.HandleFunc("/stop-cast/", twitchEndpoint.StopCast)
 	http.HandleFunc("/stop-cast", twitchEndpoint.StopCast)
 	http.HandleFunc("/stream-info/", twitchEndpoint.StreamInfo)
@@ -65,9 +75,25 @@ func main() {
 		}
 	}))
 
-	log.Fatal(http.ListenAndServe(":3010", nil))
-}
+	server := &http.Server{
+		Addr:              fmt.Sprintf(":%d", config.Settings.Port),
+		ReadHeaderTimeout: 10 * time.Second,
+		// No WriteTimeout: /stream/ responses are long-lived live streams.
+	}
 
+	// Kill streamlink/ffmpeg children on shutdown so they don't outlive us.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Printf("Received %s, stopping active proxies", sig)
+		endpoints.ShutdownProxies()
+		os.Exit(0)
+	}()
+
+	log.Printf("Listening on %s", server.Addr)
+	log.Fatal(server.ListenAndServe())
+}
 
 type captureStatus struct {
 	http.ResponseWriter

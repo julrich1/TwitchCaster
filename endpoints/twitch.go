@@ -2,10 +2,13 @@ package endpoints
 
 import (
 	"bufio"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"twitch-caster/auth"
 	"twitch-caster/cast"
 	"twitch-caster/models"
 	"twitch-caster/services"
@@ -24,9 +28,11 @@ const proxyBasePort = 50505
 
 type streamProxy struct {
 	cmd       *exec.Cmd
-	port      int       // 0 for HLS file proxies
-	ffmpegCmd *exec.Cmd // non-nil for HLS file proxy mode
-	hlsDir    string    // non-empty for HLS file proxy mode
+	done      chan struct{} // closed once cmd has been reaped by its Wait owner
+	port      int           // 0 for HLS file proxies
+	ffmpegCmd *exec.Cmd     // non-nil for HLS file proxy mode
+	ffDone    chan struct{} // closed once ffmpegCmd has been reaped
+	hlsDir    string        // non-empty for HLS file proxy mode
 }
 
 var (
@@ -86,11 +92,11 @@ type TwitchEndpoint struct {
 }
 
 // NewTwitchEndpoint creates a new TwitchEndpoint object
-func NewTwitchEndpoint(config models.Configuration, serverPort int) *TwitchEndpoint {
+func NewTwitchEndpoint(config models.Configuration, authManager *auth.Manager) *TwitchEndpoint {
 	twitchEndpoint := TwitchEndpoint{}
 	twitchEndpoint.chromecasts = config.Chromecasts
-	twitchEndpoint.twitchService = services.NewTwitchService(config.Settings)
-	twitchEndpoint.serverPort = serverPort
+	twitchEndpoint.twitchService = services.NewTwitchService(config.Settings, authManager)
+	twitchEndpoint.serverPort = config.Settings.Port
 	twitchEndpoint.serverBaseURL = config.Settings.BaseURL
 	return &twitchEndpoint
 }
@@ -98,11 +104,15 @@ func NewTwitchEndpoint(config models.Configuration, serverPort int) *TwitchEndpo
 // CastTwitch is the entry point for a cast twitch HTTP request
 func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 	var pathParams = strings.Split(r.URL.Path, "/")
+	if len(pathParams) < 2 {
+		http.Error(w, "expected /gui/cast/{streamer}/{deviceIP}", http.StatusBadRequest)
+		return
+	}
 	var ipAddress = pathParams[len(pathParams)-1]
 	var streamID = pathParams[len(pathParams)-2]
 
-	if streamID == "" {
-		fmt.Fprintf(w, "Invalid stream ID")
+	if streamID == "" || ipAddress == "" {
+		http.Error(w, "expected /gui/cast/{streamer}/{deviceIP}", http.StatusBadRequest)
 		return
 	}
 
@@ -116,12 +126,12 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if quality == "" {
-		fmt.Printf("Cast request: unknown device %s\n", ipAddress)
-		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("Cast request: unknown device %s", ipAddress)
+		http.Error(w, "unknown device "+ipAddress, http.StatusNotFound)
 		return
 	}
 
-	fmt.Printf("Cast request: %s → %s (%s)\n", streamID, deviceName, ipAddress)
+	log.Printf("Cast request: %s → %s (%s)\n", streamID, deviceName, ipAddress)
 
 	meta := &cast.MediaMeta{Login: streamID}
 	if title, game, viewerCount, err := t.twitchService.FetchStreamByLogin(streamID); err == nil && title != "" {
@@ -137,7 +147,7 @@ func (t *TwitchEndpoint) CastTwitch(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		if err := proxyAndCast(streamID, quality, appID, ipAddress, t.serverPort, t.serverBaseURL, meta, gen); err != nil {
-			fmt.Printf("Error casting %s to %s: %v\n", streamID, ipAddress, err)
+			log.Printf("Error casting %s to %s: %v\n", streamID, ipAddress, err)
 		}
 	}()
 }
@@ -202,7 +212,7 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		}
 		hlsDir := filepath.Join(os.TempDir(), "tc-hls", hlsID)
 		detectedCodec := detectVideoCodec(hlsDir)
-		fmt.Printf("[%s] Detected codec: %q\n", ipAddress, detectedCodec)
+		log.Printf("[%s] Detected codec: %q\n", ipAddress, detectedCodec)
 		state := &streamState{Seq: gen, URL: castURL, Codec: detectedCodec}
 		if meta != nil {
 			state.Login = meta.Login
@@ -218,7 +228,7 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 			sessionMap[session.SessionID] = hlsID
 			sessionMu.Unlock()
 		}
-		fmt.Printf("[%s] Casting %s via HLS file proxy (custom receiver, session=%s)\n", ipAddress, streamID, session.SessionID)
+		log.Printf("[%s] Casting %s via HLS file proxy (custom receiver, session=%s)\n", ipAddress, streamID, session.SessionID)
 		session.Close()
 		return nil
 	}
@@ -230,7 +240,7 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		cmaf, _ := isCMAFManifest(hlsURL)
 		if !cmaf {
 			killProxy(ipAddress)
-			fmt.Printf("[%s] Casting %s via direct HLS [%s]\n", ipAddress, streamID, resolvedQuality)
+			log.Printf("[%s] Casting %s via direct HLS [%s]\n", ipAddress, streamID, resolvedQuality)
 			return cast.URL(hlsURL, ipAddress, "application/x-mpegURL", "LIVE", appID, meta)
 		}
 		if _, err := startDeviceHLSProxy(streamID, qualityArg, ipAddress, gen); err != nil {
@@ -242,7 +252,7 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 			return err
 		}
 		castURL := fmt.Sprintf("http://%s:%d/hls-files/%s/index.m3u8", localIP, serverPort, strings.ReplaceAll(ipAddress, ".", "-"))
-		fmt.Printf("[%s] Casting %s via HLS file proxy [%s]\n", ipAddress, streamID, resolvedQuality)
+		log.Printf("[%s] Casting %s via HLS file proxy [%s]\n", ipAddress, streamID, resolvedQuality)
 		return cast.URL(castURL, ipAddress, "application/x-mpegURL", "LIVE", appID, meta)
 	}
 
@@ -255,7 +265,7 @@ func proxyAndCast(streamID, quality, appID, ipAddress string, serverPort int, se
 		return err
 	}
 	streamURL := fmt.Sprintf("http://%s:%d/stream/%s", localIP, serverPort, ipAddress)
-	fmt.Printf("[%s] Casting %s via stream proxy\n", ipAddress, streamID)
+	log.Printf("[%s] Casting %s via stream proxy\n", ipAddress, streamID)
 	return cast.URL(streamURL, ipAddress, "video/mp4", "BUFFERED", appID, meta)
 }
 
@@ -321,15 +331,38 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 		os.RemoveAll(hlsDir)
 		return "", fmt.Errorf("streamlink start failed: %w", startErr)
 	}
-	fmt.Printf("[%s] streamlink started (pid %d): %s\n", ipAddress, slCmd.Process.Pid, strings.Join(slCmd.Args, " "))
+	log.Printf("[%s] streamlink started (pid %d): %s", ipAddress, slCmd.Process.Pid, strings.Join(slCmd.Args, " "))
+
+	// Each command has exactly one Wait owner; everything else that needs the
+	// process reaped (kill paths, exit watchers) blocks on the done channel.
+	slDone := make(chan struct{})
+	var slExitErr error
+	go func() {
+		slExitErr = slCmd.Wait()
+		close(slDone)
+	}()
 
 	if startErr := ffCmd.Start(); startErr != nil {
 		slCmd.Process.Kill()
-		_ = slCmd.Wait()
+		<-slDone
 		os.RemoveAll(hlsDir)
 		return "", fmt.Errorf("ffmpeg start failed: %w", startErr)
 	}
-	fmt.Printf("[%s] ffmpeg started (pid %d): %s\n", ipAddress, ffCmd.Process.Pid, strings.Join(ffCmd.Args, " "))
+	log.Printf("[%s] ffmpeg started (pid %d): %s", ipAddress, ffCmd.Process.Pid, strings.Join(ffCmd.Args, " "))
+
+	ffDone := make(chan struct{})
+	var ffExitErr error
+	go func() {
+		ffExitErr = ffCmd.Wait()
+		close(ffDone)
+	}()
+
+	killBoth := func() {
+		slCmd.Process.Kill()
+		ffCmd.Process.Kill()
+		<-slDone
+		<-ffDone
+	}
 
 	// Capture the resolved quality from the "Opening stream: 1080p60 (HLS)" log line.
 	qualityCh := make(chan string, 1)
@@ -338,7 +371,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 		for scanner.Scan() {
 			line := scanner.Text()
 			if strings.Contains(line, "Opening stream") || strings.Contains(line, "rror") {
-				fmt.Printf("streamlink [%s]: %s\n", ipAddress, line)
+				log.Printf("streamlink [%s]: %s\n", ipAddress, line)
 			}
 			if q := parseStreamQuality(line); q != "unknown" {
 				select {
@@ -351,7 +384,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 	go func() {
 		scanner := bufio.NewScanner(ffStderr)
 		for scanner.Scan() {
-			fmt.Printf("ffmpeg [%s]: %s\n", ipAddress, scanner.Text())
+			log.Printf("ffmpeg [%s]: %s\n", ipAddress, scanner.Text())
 		}
 	}()
 
@@ -364,10 +397,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 	for time.Now().Before(deadline) {
 		if !isCastGenCurrent(ipAddress, gen) {
 			// A newer cast request has taken over; leave the directory alone.
-			slCmd.Process.Kill()
-			ffCmd.Process.Kill()
-			_ = slCmd.Wait()
-			_ = ffCmd.Wait()
+			killBoth()
 			return "", fmt.Errorf("cast superseded for %s", ipAddress)
 		}
 		if _, statErr := os.Stat(hlsManifest); statErr == nil {
@@ -378,10 +408,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 		time.Sleep(100 * time.Millisecond)
 	}
 	if segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.m4s")); len(segs) == 0 {
-		slCmd.Process.Kill()
-		ffCmd.Process.Kill()
-		_ = slCmd.Wait()
-		_ = ffCmd.Wait()
+		killBoth()
 		// Only remove the directory if we still own it — a newer proxy may have
 		// already claimed this path.
 		if isCastGenCurrent(ipAddress, gen) {
@@ -397,7 +424,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 	}
 
 	streamProxyMu.Lock()
-	streamProxies[ipAddress] = &streamProxy{cmd: slCmd, ffmpegCmd: ffCmd, hlsDir: hlsDir}
+	streamProxies[ipAddress] = &streamProxy{cmd: slCmd, done: slDone, ffmpegCmd: ffCmd, ffDone: ffDone, hlsDir: hlsDir}
 	streamProxyMu.Unlock()
 
 	// Seed the access time so the watchdog counts from first-segment-ready, not from
@@ -419,7 +446,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 			last := hlsLastAccess[ipAddress]
 			hlsAccessMu.Unlock()
 			if time.Since(last) > 2*time.Minute {
-				fmt.Printf("[%s] HLS proxy idle for 2 minutes, stopping\n", ipAddress)
+				log.Printf("[%s] HLS proxy idle for 2 minutes, stopping\n", ipAddress)
 				killProxy(ipAddress)
 				return
 			}
@@ -432,7 +459,7 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 					}
 				}
 				if age := time.Since(newest); age > 15*time.Second {
-					fmt.Printf("[%s] WARNING: newest HLS segment is %s old — possible pipeline stall\n", ipAddress, age.Round(time.Second))
+					log.Printf("[%s] WARNING: newest HLS segment is %s old — possible pipeline stall\n", ipAddress, age.Round(time.Second))
 				}
 			}
 		}
@@ -440,30 +467,26 @@ func startDeviceHLSProxy(streamID, qualityArg, ipAddress string, gen uint64) (re
 
 	// ffmpeg watcher: detects ffmpeg dying before streamlink (pipeline stall scenario).
 	go func() {
-		err := ffCmd.Wait()
+		<-ffDone
 		streamProxyMu.Lock()
 		p, ok := streamProxies[ipAddress]
 		current := ok && p.cmd == slCmd
 		streamProxyMu.Unlock()
 		if current {
-			fmt.Printf("[%s] ffmpeg exited unexpectedly: %v\n", ipAddress, err)
+			log.Printf("[%s] ffmpeg exited unexpectedly: %v", ipAddress, ffExitErr)
 			slCmd.Process.Kill()
 		}
 	}()
 
 	go func() {
-		err := slCmd.Wait()
+		<-slDone
 		ffCmd.Process.Kill()
-		// ffmpeg goroutine owns ffCmd.Wait(); don't call it here.
 		streamProxyMu.Lock()
 		if p, ok := streamProxies[ipAddress]; ok && p.cmd == slCmd {
 			delete(streamProxies, ipAddress)
 			os.RemoveAll(hlsDir)
-			fmt.Printf("[%s] streamlink exited: %v\n", ipAddress, err)
-			hlsID := strings.ReplaceAll(ipAddress, ".", "-")
-			currentStreamMu.Lock()
-			delete(currentStreams, hlsID)
-			currentStreamMu.Unlock()
+			log.Printf("[%s] streamlink exited: %v", ipAddress, slExitErr)
+			clearStreamState(strings.ReplaceAll(ipAddress, ".", "-"))
 		}
 		streamProxyMu.Unlock()
 	}()
@@ -482,20 +505,20 @@ func startDeviceProxy(streamID, qualityArg, ipAddress string) (int, error) {
 	killExistingProxy(ipAddress)
 
 	port := allocateProxyPort()
-	cmd, err := startProxy(streamID, qualityArg, port)
+	cmd, done, err := startProxy(streamID, qualityArg, port)
 	if err != nil {
 		return 0, err
 	}
 
-	streamProxies[ipAddress] = &streamProxy{cmd: cmd, port: port}
+	streamProxies[ipAddress] = &streamProxy{cmd: cmd, done: done, port: port}
 
 	go monitorAndKillProxy(cmd, port, ipAddress)
 	go func() {
-		cmd.Wait()
+		<-done
 		streamProxyMu.Lock()
 		if p, ok := streamProxies[ipAddress]; ok && p.cmd == cmd {
 			delete(streamProxies, ipAddress)
-			fmt.Printf("Proxy for %s exited, port %d released\n", ipAddress, port)
+			log.Printf("Proxy for %s exited, port %d released", ipAddress, port)
 		}
 		streamProxyMu.Unlock()
 	}()
@@ -517,7 +540,7 @@ func monitorAndKillProxy(cmd *exec.Cmd, port int, ipAddress string) {
 		time.Sleep(time.Second)
 	}
 	if !connected {
-		fmt.Printf("No connection on port %d after 30s, killing proxy for %s\n", port, ipAddress)
+		log.Printf("No connection on port %d after 30s, killing proxy for %s\n", port, ipAddress)
 		cmd.Process.Kill()
 		return
 	}
@@ -528,7 +551,7 @@ func monitorAndKillProxy(cmd *exec.Cmd, port int, ipAddress string) {
 		if !hasActiveConnection(port) {
 			time.Sleep(10 * time.Second)
 			if !hasActiveConnection(port) {
-				fmt.Printf("Chromecast disconnected from port %d, killing proxy for %s\n", port, ipAddress)
+				log.Printf("Chromecast disconnected from port %d, killing proxy for %s\n", port, ipAddress)
 				cmd.Process.Kill()
 				return
 			}
@@ -558,7 +581,7 @@ func (t *TwitchEndpoint) StreamProxy(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimRight(r.URL.Path, "/"), "/")
 	deviceIP := parts[len(parts)-1]
 
-	fmt.Printf("StreamProxy: %s %s from %s (Range: %q)\n", r.Method, r.URL.Path, r.RemoteAddr, r.Header.Get("Range"))
+	log.Printf("StreamProxy: %s %s from %s (Range: %q)\n", r.Method, r.URL.Path, r.RemoteAddr, r.Header.Get("Range"))
 
 	streamProxyMu.Lock()
 	proxy, ok := streamProxies[deviceIP]
@@ -601,7 +624,7 @@ func (t *TwitchEndpoint) StreamProxy(w http.ResponseWriter, r *http.Request) {
 		n, readErr := body.Read(buf)
 		if n > 0 {
 			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
-				fmt.Printf("StreamProxy: client %s disconnected after %d MB\n", r.RemoteAddr, cumulative/1024/1024)
+				log.Printf("StreamProxy: client %s disconnected after %d MB\n", r.RemoteAddr, cumulative/1024/1024)
 				return
 			}
 			cumulative += n
@@ -611,7 +634,7 @@ func (t *TwitchEndpoint) StreamProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if elapsed := time.Since(lastLog); elapsed >= 5*time.Second {
-			fmt.Printf("StreamProxy: %s %.1f KB/s (total %d MB)\n",
+			log.Printf("StreamProxy: %s %.1f KB/s (total %d MB)\n",
 				r.RemoteAddr,
 				float64(intervalBytes)/elapsed.Seconds()/1024,
 				cumulative/1024/1024)
@@ -619,22 +642,25 @@ func (t *TwitchEndpoint) StreamProxy(w http.ResponseWriter, r *http.Request) {
 			lastLog = time.Now()
 		}
 		if readErr != nil {
-			fmt.Printf("StreamProxy: upstream ended for %s after %d MB: %v\n", r.RemoteAddr, cumulative/1024/1024, readErr)
+			log.Printf("StreamProxy: upstream ended for %s after %d MB: %v\n", r.RemoteAddr, cumulative/1024/1024, readErr)
 			return
 		}
 	}
 }
 
 // killExistingProxy kills any running proxy for the device and cleans up.
-// Must be called with streamProxyMu held.
+// Must be called with streamProxyMu held. The Wait owner goroutines close the
+// done channels without taking streamProxyMu, so blocking on them here is safe.
 func killExistingProxy(ipAddress string) {
 	if p, ok := streamProxies[ipAddress]; ok {
-		fmt.Printf("[%s] Killing existing proxy (pid %d)\n", ipAddress, p.cmd.Process.Pid)
+		log.Printf("[%s] Killing existing proxy (pid %d)", ipAddress, p.cmd.Process.Pid)
 		p.cmd.Process.Kill()
-		_ = p.cmd.Wait()
 		if p.ffmpegCmd != nil {
 			p.ffmpegCmd.Process.Kill()
-			_ = p.ffmpegCmd.Wait()
+		}
+		<-p.done
+		if p.ffDone != nil {
+			<-p.ffDone
 		}
 		if p.hlsDir != "" {
 			os.RemoveAll(p.hlsDir)
@@ -643,10 +669,37 @@ func killExistingProxy(ipAddress string) {
 		// Clear the current stream state so the receiver gets a 204 and stops
 		// its HLS polling loop. Without this the receiver keeps requesting
 		// index.m3u8 forever against a directory that no longer exists.
-		hlsID := strings.ReplaceAll(ipAddress, ".", "-")
-		currentStreamMu.Lock()
-		delete(currentStreams, hlsID)
-		currentStreamMu.Unlock()
+		clearStreamState(strings.ReplaceAll(ipAddress, ".", "-"))
+	}
+}
+
+// clearStreamState removes the receiver-facing state for a device so its
+// /current-stream/ polls return 204, and prunes session-ID mappings pointing
+// at it so sessionMap stays bounded by active streams.
+func clearStreamState(hlsID string) {
+	currentStreamMu.Lock()
+	delete(currentStreams, hlsID)
+	currentStreamMu.Unlock()
+	sessionMu.Lock()
+	for sid, id := range sessionMap {
+		if id == hlsID {
+			delete(sessionMap, sid)
+		}
+	}
+	sessionMu.Unlock()
+}
+
+// ShutdownProxies kills every active proxy so no streamlink/ffmpeg children
+// outlive the server process. Called from the signal handler on shutdown.
+func ShutdownProxies() {
+	streamProxyMu.Lock()
+	ips := make([]string, 0, len(streamProxies))
+	for ip := range streamProxies {
+		ips = append(ips, ip)
+	}
+	streamProxyMu.Unlock()
+	for _, ip := range ips {
+		killProxy(ip)
 	}
 }
 
@@ -680,10 +733,10 @@ func resolveStream(streamID, qualityArg string, extraArgs ...string) (url, quali
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			fmt.Printf("resolveStream stderr: %s\n", strings.TrimSpace(string(exitErr.Stderr)))
+			log.Printf("resolveStream stderr: %s\n", strings.TrimSpace(string(exitErr.Stderr)))
 		}
 		if len(out) > 0 {
-			fmt.Printf("resolveStream stdout: %s\n", strings.TrimSpace(string(out)))
+			log.Printf("resolveStream stdout: %s\n", strings.TrimSpace(string(out)))
 		}
 		return "", "", err
 	}
@@ -752,8 +805,10 @@ func parseStreamQuality(s string) string {
 	return "unknown"
 }
 
+var manifestClient = &http.Client{Timeout: 10 * time.Second}
+
 func isCMAFManifest(hlsURL string) (bool, error) {
-	resp, err := http.Get(hlsURL)
+	resp, err := manifestClient.Get(hlsURL)
 	if err != nil {
 		return false, err
 	}
@@ -762,7 +817,7 @@ func isCMAFManifest(hlsURL string) (bool, error) {
 	return strings.Contains(string(body), "#EXT-X-MAP"), nil
 }
 
-func startProxy(streamID, qualityArg string, port int) (*exec.Cmd, error) {
+func startProxy(streamID, qualityArg string, port int) (*exec.Cmd, chan struct{}, error) {
 	args := []string{
 		"--player-external-http",
 		fmt.Sprintf("--player-external-http-port=%d", port),
@@ -775,27 +830,32 @@ func startProxy(streamID, qualityArg string, port int) (*exec.Cmd, error) {
 	cmd := exec.Command("streamlink", args...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	done := make(chan struct{})
+	go func() {
+		cmd.Wait()
+		close(done)
+	}()
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if strings.Contains(line, "Opening stream") || strings.Contains(line, "rror") {
-				fmt.Printf("streamlink [%s]: %s\n", streamID, line)
+				log.Printf("streamlink [%s]: %s", streamID, line)
 			}
 		}
 		io.Copy(io.Discard, stderr)
 	}()
 	if err := waitForPort(port, 15*time.Second); err != nil {
 		cmd.Process.Kill()
-		_ = cmd.Wait()
-		return nil, err
+		<-done
+		return nil, nil, err
 	}
-	return cmd, nil
+	return cmd, done, nil
 }
 
 // streamlinkQualityArg converts a Chromecast quality preference into a
@@ -845,12 +905,12 @@ func getLocalIP() (string, error) {
 func (t *TwitchEndpoint) StopCast(w http.ResponseWriter, r *http.Request) {
 	hlsID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/stop-cast"), "/")
 	if hlsID == "" {
-		fmt.Printf("Stop cast request (no device ID)\n")
+		log.Printf("Stop cast request (no device ID)\n")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	ip := strings.ReplaceAll(hlsID, "-", ".")
-	fmt.Printf("Stop cast request for %s\n", ip)
+	log.Printf("Stop cast request for %s\n", ip)
 	killProxy(ip)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -891,7 +951,7 @@ func (t *TwitchEndpoint) ReceiverSession(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	fmt.Printf("[receiver-session] %s → %s\n", sessionID, hlsID)
+	log.Printf("[receiver-session] %s → %s\n", sessionID, hlsID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"hlsID": hlsID})
 }
@@ -926,7 +986,7 @@ func (t *TwitchEndpoint) StreamInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing login", http.StatusBadRequest)
 		return
 	}
-	fmt.Printf("[stream-info] polling %s\n", login)
+	log.Printf("[stream-info] polling %s\n", login)
 	title, game, viewerCount, err := t.twitchService.FetchStreamByLogin(login)
 	if err != nil {
 		http.Error(w, "upstream error", http.StatusInternalServerError)
@@ -936,6 +996,21 @@ func (t *TwitchEndpoint) StreamInfo(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"title": title, "game": game, "viewerCount": viewerCount})
 }
 
+//go:embed templates/channel_list.html
+var channelListHTML string
+
+var channelListTemplate = template.Must(template.New("channel_list").Parse(channelListHTML))
+
+type channelListStreamer struct {
+	models.OnlineStreamer
+	ViewerCountDisplay string
+}
+
+type channelListData struct {
+	Chromecasts []models.Chromecast
+	Streamers   []channelListStreamer
+}
+
 // TwitchChannelList is the entry point for an HTTP channel list request
 func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Request) {
 	if !t.twitchService.HasUserToken() {
@@ -943,64 +1018,47 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	onlineStreamers, error := t.twitchService.FetchFollowedStreams()
-	if error != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Println(error)
+	onlineStreamers, err := t.twitchService.FetchFollowedStreams()
+	if err != nil {
+		log.Println("Error fetching followed streams:", err)
+		// The 401 handler may have cleared a rejected user token; bounce back
+		// into the OAuth flow instead of showing an error.
+		if !t.twitchService.HasUserToken() {
+			http.Redirect(w, r, "/auth/twitch", http.StatusFound)
+			return
+		}
+		http.Error(w, "failed to fetch followed streams", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, "%s", "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"/static/style.css\"><link rel=\"icon\" type=\"image/x-icon\" href=\"/static/favicon.ico\"/></head><body>")
-	fmt.Fprintf(w, "%s",
-		`<script>
-		  function manualCast(element) {
-				const streamer = document.getElementsByName("sname")[0].value
-				castStreamer(streamer, element)
-			}
-			function castStreamer(streamer, element) {
-				const http = new XMLHttpRequest()
-				const dropDownElement = document.getElementById("device_selection")
-				const ip = dropDownElement.options[dropDownElement.selectedIndex].value
-				const url='/gui/cast/' + streamer + '/' + ip
-				http.open("GET", url)
-
-				http.onreadystatechange = (e) => {
-					if (http.readyState === 4 && http.status === 200) {
-					}
-				}
-				http.send();
-			}
-		</script>`)
-	fmt.Fprintf(w, "%s", "<div class=\"logoContainer\"><img class=\"logo\" src=\"/static/twitch-logo.png\"></div>")
-
-	fmt.Fprintf(w, "%s", "<select id=\"device_selection\">")
-	for _, chromecast := range t.chromecasts {
-		fmt.Fprintf(w, "<option value=\""+chromecast.IPAddress+"\">"+chromecast.Name+"</option>")
-	}
-	fmt.Fprintf(w, "</select><br>")
-
-	fmt.Fprintf(w, "%s", "<div class=\"manualContainer\"><input type=\"text\" name=\"sname\"><button onclick=\"manualCast(this);\">Manual Cast</button></div>")
-	fmt.Fprintf(w, "%s", "<div class='container'>")
+	data := channelListData{Chromecasts: t.chromecasts}
 	for _, user := range onlineStreamers {
-		fmt.Fprintf(w, "%s",
-			"<div class='streamContainer'>"+
-				"<div onclick=\"castStreamer('"+user.Login+"', this);\" class='thumbnailContainer'>"+
-				"<img src=\""+user.ThumbnailURL+"\" class='thumbnailImage'>"+
-				"<div class='viewerCountContainer'><div class='viewerCount'><script>document.write(parseInt("+user.ViewerCount+").toLocaleString()+' viewers')</script></div></div>"+
-				"</div>"+
-				"<div class='streamDetailsContainer'>"+
-				"<div class='profileImageContainer'>"+
-				"<img src=\""+user.ProfileImageURL+"\" class='profileImage'>"+
-				"</div>"+
-				"<div class='textContainer'>"+
-				"<h3>"+user.Title+"</h3>"+
-				"<h4>"+user.Name+"</h4>"+
-				"<h4>"+user.Game+"</h4>"+
-				"</div>"+
-				"</div>"+
-				"</div>")
+		data.Streamers = append(data.Streamers, channelListStreamer{
+			OnlineStreamer:     user,
+			ViewerCountDisplay: formatCount(user.ViewerCount),
+		})
 	}
-	fmt.Fprintf(w, "%s", "</div>")
-	fmt.Fprintf(w, "%s", "</body></html>")
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := channelListTemplate.Execute(w, data); err != nil {
+		log.Println("Error rendering channel list:", err)
+	}
+}
+
+// formatCount adds thousands separators to a numeric string ("12345" → "12,345").
+func formatCount(s string) string {
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	lead := len(s) % 3
+	if lead == 0 {
+		lead = 3
+	}
+	b.WriteString(s[:lead])
+	for i := lead; i < len(s); i += 3 {
+		b.WriteByte(',')
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
 }

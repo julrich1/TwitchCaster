@@ -8,12 +8,14 @@ type Configuration struct {
 
 // Settings required to run the application
 type Settings struct {
-	UserID          string `json:"userId"`
-	TwitchClientID  string `json:"twitchClientId"`
-	TwitchSecret    string `json:"twitchSecret"`
-	BaseURL         string `json:"baseURL"`
-	ChannelListURL  string `json:"channelListURL"`
-	CastURL         string `json:"castURL"`
+	UserID         string `json:"userId"`
+	TwitchClientID string `json:"twitchClientId"`
+	TwitchSecret   string `json:"twitchSecret"`
+	AdminPassword  string `json:"adminPassword"`
+	BaseURL        string `json:"baseURL"`
+	ChannelListURL string `json:"channelListURL"`
+	CastURL        string `json:"castURL"`
+	Port           int    `json:"port"`
 }
 
 // Chromecast objects that are cast targets
