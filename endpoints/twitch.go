@@ -44,7 +44,7 @@ const (
 // hlsProxyOpts controls startDeviceHLSProxy behavior per caller.
 type hlsProxyOpts struct {
 	minSegments int
-	attempt     int // recovery attempt that started this proxy (0 or 1 = fresh)
+	attempt     int // recovery attempt that started this proxy (0 = fresh cast)
 	// onUnexpectedExit is invoked (in a new goroutine) when streamlink dies
 	// without being deliberately killed. nil disables recovery.
 	onUnexpectedExit func(nextAttempt int)
@@ -256,9 +256,10 @@ func (t *TwitchEndpoint) proxyAndCast(streamID, quality, appID, ipAddress string
 		wg.Add(3)
 		go func() {
 			defer wg.Done()
+			// attempt 0 = fresh cast, so the first recovery is attempt 1/3.
 			proxyQuality, proxyErr = startDeviceHLSProxy(streamID, qualityArg, ipAddress, gen, hlsProxyOpts{
 				minSegments:      customReceiverMinSegments,
-				attempt:          1,
+				attempt:          0,
 				onUnexpectedExit: recoverStream,
 			})
 		}()
