@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,6 +40,15 @@ const (
 	maxRecoveryAttempts = 3
 	recoveryRetryDelay  = 2 * time.Second
 	healthyRunReset     = 5 * time.Minute // a proxy that ran this long resets the attempt counter
+
+	// Playback-stall detection via the receiver heartbeat. The receiver POSTs
+	// its currentTime every few seconds; if the playhead stops advancing while
+	// the video is playing (not paused) for longer than playbackStallThreshold
+	// AND segments are still fresh, the receiver's MSE player has stalled and we
+	// force it to rebuild. A stale segment feed instead means a pipeline problem,
+	// which the exit/idle watchdogs already handle — so we leave those alone.
+	playbackStallThreshold = 15 * time.Second
+	segmentFreshThreshold  = 12 * time.Second
 )
 
 // hlsProxyOpts controls startDeviceHLSProxy behavior per caller.
@@ -70,11 +80,22 @@ var (
 	castGens  = make(map[string]uint64) // keyed by Chromecast IP
 
 	currentStreamMu sync.Mutex
-	currentStreams   = make(map[string]*streamState) // keyed by hlsID
+	currentStreams  = make(map[string]*streamState) // keyed by hlsID
 
 	sessionMu  sync.Mutex
 	sessionMap = make(map[string]string) // Cast sessionID → hlsID
+
+	heartbeatMu sync.Mutex
+	heartbeats  = make(map[string]*hbState) // keyed by hlsID
 )
+
+// hbState tracks receiver playback progress between heartbeats so we can detect
+// a frozen playhead. Guarded by heartbeatMu.
+type hbState struct {
+	seq        uint64    // stream Seq this tracker is following
+	lastTime   float64   // last reported video.currentTime
+	advancedAt time.Time // last moment currentTime moved forward
+}
 
 type streamState struct {
 	Seq         uint64 `json:"seq"`
@@ -122,6 +143,7 @@ type TwitchEndpoint struct {
 	twitchService *services.TwitchService
 	serverPort    int
 	serverBaseURL string // external HTTPS base URL, used by custom receivers to avoid CORS
+	castURL       string // configured cast route prefix, handed to the GUI so it isn't hard-coded there
 	tokenMonitor  *TokenMonitor
 }
 
@@ -132,6 +154,7 @@ func NewTwitchEndpoint(config models.Configuration, authManager *auth.Manager, t
 	twitchEndpoint.twitchService = services.NewTwitchService(config.Settings, authManager)
 	twitchEndpoint.serverPort = config.Settings.Port
 	twitchEndpoint.serverBaseURL = config.Settings.BaseURL
+	twitchEndpoint.castURL = config.Settings.CastURL
 	twitchEndpoint.tokenMonitor = tokenMonitor
 	return &twitchEndpoint
 }
@@ -360,6 +383,36 @@ func publishStreamState(hlsID, castURL, ipAddress, proxyQuality string, meta *ca
 	currentStreamMu.Lock()
 	currentStreams[hlsID] = state
 	currentStreamMu.Unlock()
+}
+
+// forcePlayerRebuild bumps the published Seq for a device without touching the
+// proxy, so the receiver's /current-stream poll sees a "new" stream and rebuilds
+// its MSE player against the still-healthy segment feed. Used to recover from a
+// receiver-side playback stall detected via the heartbeat.
+func forcePlayerRebuild(hlsID string) {
+	currentStreamMu.Lock()
+	if state, ok := currentStreams[hlsID]; ok {
+		state.Seq = nextStreamSeq()
+	}
+	currentStreamMu.Unlock()
+}
+
+// newestSegmentAge returns how long ago the most recent HLS segment for a device
+// was written, or a large duration if no segments exist yet. Used to tell a
+// receiver-side stall (fresh segments) apart from a pipeline stall (stale ones).
+func newestSegmentAge(hlsID string) time.Duration {
+	hlsDir := filepath.Join(os.TempDir(), "tc-hls", hlsID)
+	segs, _ := filepath.Glob(filepath.Join(hlsDir, "*.m4s"))
+	var newest time.Time
+	for _, seg := range segs {
+		if info, err := os.Stat(seg); err == nil && info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	if newest.IsZero() {
+		return time.Hour
+	}
+	return time.Since(newest)
 }
 
 // startDeviceHLSProxy pipes streamlink → ffmpeg to produce a live TS-based HLS
@@ -819,6 +872,9 @@ func clearStreamState(hlsID string) {
 		}
 	}
 	sessionMu.Unlock()
+	heartbeatMu.Lock()
+	delete(heartbeats, hlsID)
+	heartbeatMu.Unlock()
 }
 
 // ShutdownProxies kills every active proxy so no streamlink/ffmpeg children
@@ -1067,6 +1123,136 @@ func (t *TwitchEndpoint) CurrentStream(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(state)
 }
 
+// heartbeatPayload is the playback telemetry the custom receiver POSTs every
+// few seconds while a stream is active. The fields below CurrentTime are a
+// diagnostic snapshot of the MSE player, logged when a stall is detected to
+// explain *why* playback froze — since silent stalls throw no error.
+type heartbeatPayload struct {
+	Seq         uint64   `json:"seq"`
+	CurrentTime float64  `json:"currentTime"`
+	Paused      bool     `json:"paused"`
+	Errors      []string `json:"errors,omitempty"`
+	// GapJumps are diagnostic notes for buffer-gap seeks the receiver performed
+	// to skip a timeline hole (not errors — playback recovered on its own).
+	GapJumps []string `json:"gapJumps,omitempty"`
+
+	// video.readyState (0=NOTHING 1=METADATA 2=CURRENT 3=FUTURE 4=ENOUGH) and
+	// video.networkState (0=EMPTY 1=IDLE 2=LOADING 3=NO_SOURCE).
+	ReadyState   int `json:"readyState"`
+	NetworkState int `json:"networkState"`
+	// BufferAhead is seconds buffered past the playhead; ~0 with the feed alive
+	// means starvation. GapAhead means the playhead sits before a hole in the
+	// buffered ranges (a dropped/misordered segment). BufferedEnd is the end of
+	// the last buffered range (buffer depth).
+	BufferAhead float64 `json:"bufferAhead"`
+	BufferedEnd float64 `json:"bufferedEnd"`
+	GapAhead    bool    `json:"gapAhead"`
+	// Append-pipeline health: pending queue length, whether an append is in
+	// flight, the MediaSource state ("open"/"ended"/"closed"), and seconds since
+	// the last successful append / last freshly-fetched segment (-1 = never).
+	QueueLen      int     `json:"queueLen"`
+	Appending     bool    `json:"appending"`
+	MSReadyState  string  `json:"msReadyState"`
+	LastAppendAgo float64 `json:"lastAppendAgo"`
+	LastFetchAgo  float64 `json:"lastFetchAgo"`
+	VideoError    string  `json:"videoError,omitempty"`
+}
+
+// snapshot renders the diagnostic fields as a compact log fragment.
+func (hb heartbeatPayload) snapshot() string {
+	s := fmt.Sprintf("readyState=%d netState=%d bufferAhead=%.1fs bufferedEnd=%.1fs gapAhead=%v queue=%d appending=%v ms=%s lastAppend=%.1fs lastFetch=%.1fs",
+		hb.ReadyState, hb.NetworkState, hb.BufferAhead, hb.BufferedEnd, hb.GapAhead,
+		hb.QueueLen, hb.Appending, hb.MSReadyState, hb.LastAppendAgo, hb.LastFetchAgo)
+	if hb.VideoError != "" {
+		s += " err=" + hb.VideoError
+	}
+	return s
+}
+
+// ReceiverHeartbeat receives periodic playback telemetry from the custom
+// receiver. Healthy heartbeats are silent by design; only reported errors are
+// logged. A frozen playhead (currentTime not advancing while playing, with the
+// segment feed still fresh) means the receiver's MSE player has stalled, so we
+// force it to rebuild. Stays unauthenticated — the receiver calls it directly.
+func (t *TwitchEndpoint) ReceiverHeartbeat(w http.ResponseWriter, r *http.Request) {
+	hlsID := strings.TrimPrefix(r.URL.Path, "/receiver-heartbeat/")
+	if hlsID == "" {
+		http.Error(w, "missing hlsID", http.StatusBadRequest)
+		return
+	}
+	var hb heartbeatPayload
+	if err := json.NewDecoder(r.Body).Decode(&hb); err != nil {
+		http.Error(w, "bad payload", http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+
+	ip := strings.ReplaceAll(hlsID, "-", ".")
+	for _, e := range hb.Errors {
+		if e = strings.TrimSpace(e); e != "" {
+			log.Printf("[%s] receiver error: %s", ip, e)
+		}
+	}
+	// Gap jumps are recoveries, not errors — the receiver skipped a hole and kept
+	// playing. Logged so we can see how often/large these are without a rebuild.
+	for _, g := range hb.GapJumps {
+		if g = strings.TrimSpace(g); g != "" {
+			log.Printf("[%s] receiver: %s", ip, g)
+		}
+	}
+
+	checkPlaybackStall(hlsID, ip, hb)
+}
+
+// checkPlaybackStall updates the per-device progress tracker from a heartbeat
+// and forces a player rebuild when the playhead has been frozen too long while
+// segments are still fresh.
+func checkPlaybackStall(hlsID, ip string, hb heartbeatPayload) {
+	currentStreamMu.Lock()
+	state, ok := currentStreams[hlsID]
+	currentStreamMu.Unlock()
+	if !ok {
+		// Nothing casting to this device; drop any stale tracker.
+		heartbeatMu.Lock()
+		delete(heartbeats, hlsID)
+		heartbeatMu.Unlock()
+		return
+	}
+
+	now := time.Now()
+	heartbeatMu.Lock()
+	hs := heartbeats[hlsID]
+	// (Re)seed on a fresh stream, a rebuild we just triggered (Seq bumped), or
+	// while paused — then wait for the next heartbeat before judging progress.
+	if hs == nil || hs.seq != hb.Seq || hb.Seq != state.Seq || hb.Paused {
+		heartbeats[hlsID] = &hbState{seq: state.Seq, lastTime: hb.CurrentTime, advancedAt: now}
+		heartbeatMu.Unlock()
+		return
+	}
+	if hb.CurrentTime > hs.lastTime+0.25 {
+		hs.lastTime = hb.CurrentTime
+		hs.advancedAt = now
+		heartbeatMu.Unlock()
+		return
+	}
+	stalledFor := now.Sub(hs.advancedAt)
+	heartbeatMu.Unlock()
+
+	if stalledFor < playbackStallThreshold {
+		return
+	}
+	// A stale segment feed is a pipeline problem, not a receiver-side MSE stall —
+	// rebuilding the player wouldn't help, so leave it to the other watchdogs.
+	if age := newestSegmentAge(hlsID); age > segmentFreshThreshold {
+		log.Printf("[%s] playback frozen %s at t=%.1fs but newest segment is %s old — pipeline stall, not rebuilding receiver — %s",
+			ip, stalledFor.Round(time.Second), hb.CurrentTime, age.Round(time.Second), hb.snapshot())
+		return
+	}
+	log.Printf("[%s] playback frozen %s at t=%.1fs with fresh segments — forcing receiver rebuild — %s",
+		ip, stalledFor.Round(time.Second), hb.CurrentTime, hb.snapshot())
+	forcePlayerRebuild(hlsID)
+}
+
 // ReceiverSession maps a Cast session ID to the hlsID of its device. The
 // native receiver calls this on startup (using the session ID from CAF) to
 // discover which device it is without relying on request IP.
@@ -1142,6 +1328,7 @@ type channelListData struct {
 	Chromecasts []models.Chromecast
 	Streamers   []channelListStreamer
 	TokenAlert  string // non-empty → warning banner at the top of the page
+	CastURL     string // cast route prefix, so static/app.js doesn't hard-code it
 }
 
 // TwitchChannelList is the entry point for an HTTP channel list request
@@ -1164,7 +1351,7 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	data := channelListData{Chromecasts: t.chromecasts}
+	data := channelListData{Chromecasts: t.chromecasts, CastURL: t.castURL}
 	if t.tokenMonitor != nil {
 		switch t.tokenMonitor.Status().State {
 		case TokenInvalid:
@@ -1173,7 +1360,17 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 			data.TokenAlert = "No streamlink token configured — casts will get ads and lose enhanced streams. Set one up."
 		}
 	}
+	// Twitch caches live thumbnails behind a stable URL, so without a
+	// cache-buster a refreshed list shows the same stale frames.
+	cacheBust := strconv.FormatInt(time.Now().Unix(), 10)
 	for _, user := range onlineStreamers {
+		if user.ThumbnailURL != "" {
+			sep := "?"
+			if strings.Contains(user.ThumbnailURL, "?") {
+				sep = "&"
+			}
+			user.ThumbnailURL += sep + "t=" + cacheBust
+		}
 		data.Streamers = append(data.Streamers, channelListStreamer{
 			OnlineStreamer:     user,
 			ViewerCountDisplay: formatCount(user.ViewerCount),

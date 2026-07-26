@@ -392,9 +392,43 @@
     // reaches START_BUFFER_SECONDS (slow/low-fps pipelines).
     var PLAYBACK_FAILSAFE_MS = 12000;
 
+    // Heartbeat: post playback progress to the server every this many ms so it
+    // can detect a frozen playhead and force a rebuild. Errors are batched and
+    // piggy-backed on the next heartbeat.
+    var HEARTBEAT_MS = 5000;
+
+    // Gap jumping: MSE parks the playhead at the end of a buffered range and
+    // waits forever when the next range starts past a timeline hole (a segment
+    // timestamp discontinuity, usually from an upstream Twitch ad/reconnect).
+    // The watchdog detects the stall and seeks across the hole — far cheaper
+    // than the server's full player rebuild, which stays as the fallback.
+    var STALL_POLL_MS = 1000;     // how often to check the playhead for a stall
+    var GAP_STALL_MS = 2500;      // no progress for this long counts as stalled
+    var MAX_GAP_JUMP_S = 15;      // don't auto-jump holes larger than this
+
+    // A failed segment fetch is retried on subsequent manifest polls, up to
+    // this many total attempts, before being skipped for good — only then does
+    // it leave a timeline hole for the gap jumper to hop.
+    var MAX_SEG_FETCH_ATTEMPTS = 3;
+
     var deviceHlsId = '';
 
     var video = document.getElementById('player');
+
+    // ── Error reporting ──────────────────────────────────────────────────────
+    // Playback-relevant errors accumulate here and ride the next heartbeat. The
+    // server logs them; healthy heartbeats stay silent.
+    var receiverErrors = [];
+    function reportError(msg) {
+      try { msg = String(msg); } catch(e) { msg = 'unstringifiable error'; }
+      console.error('[receiver]', msg);
+      if (receiverErrors.length < 20) receiverErrors.push(msg);
+    }
+
+    video.addEventListener('error', function() {
+      var err = video.error;
+      reportError('video element error' + (err ? ' code=' + err.code + (err.message ? ' ' + err.message : '') : ''));
+    });
     var streamLogin = null;
     var pollingInterval = null;
     var qualityOverlayTimer = null;
@@ -407,12 +441,15 @@
     var sourceBuffer = null;
     var initSegmentURL = null;
     var seenSequences = new Set();
+    var segFetchFails = {};  // seq → consecutive failed fetch attempts
     var hlsLoopTimer = null;
     var hlsGen = 0;
     var appending = false;
     var appendQueue = [];
     var playbackStarted = false;
     var playbackFailsafeTimer = null;
+    var lastAppendAt = 0;  // ms timestamp of the last successful segment append
+    var lastFetchAt = 0;   // ms timestamp of the last freshly-fetched segment
 
     function resetPlayer() {
       hlsGen++;
@@ -425,9 +462,12 @@
       sourceBuffer = null;
       initSegmentURL = null;
       seenSequences = new Set();
+      segFetchFails = {};
       appending = false;
       appendQueue = [];
       playbackStarted = false;
+      lastAppendAt = 0;
+      lastFetchAt = 0;
       video.src = '';
     }
 
@@ -457,11 +497,35 @@
     function drainQueue() {
       if (appending || appendQueue.length === 0 || !sourceBuffer || sourceBuffer.updating) return;
       appending = true;
-      var buf = appendQueue.shift();
+      var buf = appendQueue[0];
       try {
         sourceBuffer.appendBuffer(buf);
+        appendQueue.shift();
       } catch(e) {
         appending = false;
+        if (e.name === 'QuotaExceededError' && pruneForQuota()) {
+          // Keep the segment queued; the remove()'s updateend re-runs
+          // drainQueue, retrying the same append against the freed quota.
+          return;
+        }
+        appendQueue.shift();
+        reportError('appendBuffer failed: ' + e);
+      }
+    }
+
+    // Emergency back-buffer trim when appendBuffer hits the device's media
+    // quota (small on smart displays). Trims well past pruneBuffer's normal
+    // 30s keep-behind. Returns true if a remove() was started.
+    function pruneForQuota() {
+      if (!sourceBuffer || sourceBuffer.updating || !video.buffered.length) return false;
+      var start = video.buffered.start(0);
+      var behind = video.currentTime - 5;
+      if (behind <= start) return false;
+      try {
+        sourceBuffer.remove(start, behind);
+        return true;
+      } catch(e) {
+        return false;
       }
     }
 
@@ -489,12 +553,16 @@
         try {
           sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="' + codecs + '"');
         } catch(e) {
-          console.error('addSourceBuffer failed:', e);
+          reportError('addSourceBuffer failed (' + codecs + '): ' + e);
           return;
         }
         sourceBuffer.mode = 'segments';
+        sourceBuffer.addEventListener('error', function() {
+          reportError('sourceBuffer error');
+        });
         sourceBuffer.addEventListener('updateend', function() {
           appending = false;
+          lastAppendAt = Date.now();
           pruneBuffer();
           maybeStartPlayback();
           drainQueue();
@@ -524,6 +592,10 @@
         // Only consider the last 10 segments (~20s) to stay near the live edge
         // and avoid fetching minutes of backlog on initial load.
         var window = segments.slice(Math.max(0, segments.length - 10));
+        // Drop fail counters for seqs that rotated out of the window unresolved.
+        if (window.length) {
+          for (var k in segFetchFails) { if (+k < window[0].seq) delete segFetchFails[k]; }
+        }
         var pending = window.filter(function(s) { return !seenSequences.has(s.seq); });
         if (pending.length === 0) {
           hlsLoopTimer = setTimeout(function() { hlsLoop(manifestURL, gen); }, 2000);
@@ -544,15 +616,34 @@
     function fetchAndAppend(segments, gen, done) {
       var promises = segments.map(function(seg) {
         return fetch(seg.url)
-          .then(function(r) { return r.arrayBuffer(); })
+          .then(function(r) {
+            if (!r.ok) throw new Error('segment ' + r.status);
+            return r.arrayBuffer();
+          })
           .then(function(buf) { return { seq: seg.seq, buf: new Uint8Array(buf) }; })
           .catch(function() { return { seq: seg.seq, buf: null }; });
       });
       Promise.all(promises).then(function(results) {
         if (gen !== hlsGen) return;
         results.forEach(function(r) {
-          seenSequences.add(r.seq);
-          if (r.buf) appendQueue.push(r.buf);
+          if (r.buf) {
+            seenSequences.add(r.seq);
+            delete segFetchFails[r.seq];
+            appendQueue.push(r.buf);
+            lastFetchAt = Date.now();
+          } else {
+            // Transient failure: leave the seq unseen so the next manifest
+            // poll retries it. Only after MAX_SEG_FETCH_ATTEMPTS is it skipped
+            // for good, leaving a hole for the gap jumper.
+            var fails = (segFetchFails[r.seq] || 0) + 1;
+            if (fails >= MAX_SEG_FETCH_ATTEMPTS) {
+              reportError('segment ' + r.seq + ' skipped after ' + fails + ' failed fetches');
+              seenSequences.add(r.seq);
+              delete segFetchFails[r.seq];
+            } else {
+              segFetchFails[r.seq] = fails;
+            }
+          }
         });
         drainQueue();
         done();
@@ -662,6 +753,8 @@
 
       startHLS(data.url, data.codec);
       startStreamInfoPolling();
+      startHeartbeat();
+      startStallWatch();
       showOverlays();
     }
 
@@ -681,6 +774,8 @@
       document.getElementById('meta-streamer-text').textContent = '';
       if (qualityOverlayTimer) { clearTimeout(qualityOverlayTimer); qualityOverlayTimer = null; }
       if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+      stopHeartbeat();
+      stopStallWatch();
     }
 
     // ── Stream info polling (metadata) ───────────────────────────────────────
@@ -702,6 +797,167 @@
       if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
       fetchStreamInfo();
       pollingInterval = setInterval(fetchStreamInfo, 60000);
+    }
+
+    // ── Heartbeat ────────────────────────────────────────────────────────────
+    // Post playback progress (and any batched errors) so the server can spot a
+    // frozen playhead and force a rebuild. Only runs while a stream is active.
+
+    var heartbeatTimer = null;
+
+    // Seconds of buffered media ahead of the playhead. ~0 while the feed is
+    // alive means starvation (the append side stopped keeping up).
+    function bufferAhead() {
+      var t = video.currentTime;
+      for (var i = 0; i < video.buffered.length; i++) {
+        if (t >= video.buffered.start(i) - 0.1 && t <= video.buffered.end(i) + 0.1) {
+          return video.buffered.end(i) - t;
+        }
+      }
+      return 0; // playhead isn't inside any buffered range
+    }
+
+    // End of the contiguous buffered range the playhead sits in, or -1 if the
+    // playhead has fallen outside every buffered range.
+    function currentRangeEnd() {
+      var t = video.currentTime;
+      for (var i = 0; i < video.buffered.length; i++) {
+        if (t >= video.buffered.start(i) - 0.1 && t <= video.buffered.end(i) + 0.1) {
+          return video.buffered.end(i);
+        }
+      }
+      return -1;
+    }
+
+    // True when there's a hole in the buffered timeline ahead of the playhead:
+    // media exists beyond where the current contiguous range ends (or, if the
+    // playhead is already outside all ranges, beyond the playhead). This is the
+    // signature the player won't cross on its own — a dropped/discontinuous
+    // segment. (Unlike a plain live-edge wait, there is buffered media past it.)
+    function gapAhead() {
+      var end = currentRangeEnd();
+      var edge = end < 0 ? video.currentTime : end;
+      for (var i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) > edge + 0.1) return true;
+      }
+      return false;
+    }
+
+    // If the playhead is stuck before a hole with buffered media beyond it,
+    // returns the start of the nearest range past the hole; else -1. Used both
+    // to seek across the gap and to bound the jump distance.
+    function gapJumpTarget() {
+      var end = currentRangeEnd();
+      var edge = end < 0 ? video.currentTime : end;
+      var best = -1;
+      for (var i = 0; i < video.buffered.length; i++) {
+        var s = video.buffered.start(i);
+        if (s > edge + 0.1 && (best < 0 || s < best)) best = s;
+      }
+      return best;
+    }
+
+    function sendHeartbeat() {
+      if (!deviceHlsId) return;
+      var errs = receiverErrors;
+      receiverErrors = [];
+      var jumps = gapJumpNotes;
+      gapJumpNotes = [];
+      var now = Date.now();
+      var bufEnd = video.buffered.length ? video.buffered.end(video.buffered.length - 1) : 0;
+      fetch('/receiver-heartbeat/' + deviceHlsId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          seq: activeStreamSeq,
+          currentTime: video.currentTime || 0,
+          paused: video.paused,
+          errors: errs,
+          gapJumps: jumps,
+          readyState: video.readyState,
+          networkState: video.networkState,
+          bufferAhead: +bufferAhead().toFixed(2),
+          bufferedEnd: +bufEnd.toFixed(2),
+          gapAhead: gapAhead(),
+          queueLen: appendQueue.length,
+          appending: appending,
+          msReadyState: mediaSource ? mediaSource.readyState : 'none',
+          lastAppendAgo: lastAppendAt ? +((now - lastAppendAt) / 1000).toFixed(1) : -1,
+          lastFetchAgo: lastFetchAt ? +((now - lastFetchAt) / 1000).toFixed(1) : -1,
+          videoError: video.error ? ('code=' + video.error.code) : ''
+        }),
+        keepalive: true
+      }).catch(function() {
+        // Don't lose errors/notes if a heartbeat fails to reach the server.
+        if (errs.length) receiverErrors = errs.concat(receiverErrors).slice(0, 20);
+        if (jumps.length) gapJumpNotes = jumps.concat(gapJumpNotes).slice(0, 10);
+      });
+    }
+
+    function startHeartbeat() {
+      if (heartbeatTimer) return;
+      heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_MS);
+    }
+
+    function stopHeartbeat() {
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    }
+
+    // ── Gap-jump stall watchdog ──────────────────────────────────────────────
+    // Detects a frozen playhead parked before a buffered-timeline hole and seeks
+    // across it. Diagnostic notes ride the next heartbeat (logged server-side,
+    // distinct from errors). If a jump can't recover playback, the playhead
+    // stays frozen and the server's rebuild watchdog takes over.
+
+    var stallTimer = null;
+    var lastProgressTime = 0;  // last observed currentTime
+    var lastProgressAt = 0;    // wallclock (ms) when currentTime last advanced
+    var gapJumpNotes = [];
+
+    function checkStall() {
+      // Only meaningful once playback has started and isn't intentionally idle.
+      if (!playbackStarted || video.paused || video.seeking) {
+        lastProgressTime = video.currentTime;
+        lastProgressAt = Date.now();
+        return;
+      }
+      var t = video.currentTime;
+      if (t > lastProgressTime + 0.05) {  // advancing normally
+        lastProgressTime = t;
+        lastProgressAt = Date.now();
+        return;
+      }
+      if (Date.now() - lastProgressAt < GAP_STALL_MS) return;  // not stalled long enough
+
+      var target = gapJumpTarget();
+      if (target < 0) return;              // stalled but no gap ⇒ leave it to the rebuild
+      var gap = target - t;
+      if (gap > MAX_GAP_JUMP_S) return;    // implausibly large ⇒ leave it to the rebuild
+
+      var to = target + 0.1;               // nudge just inside the next range
+      try {
+        video.currentTime = to;
+      } catch (e) {
+        reportError('gap-jump seek failed: ' + e);
+        return;
+      }
+      // Re-arm so we don't hammer seeks while the jump settles.
+      lastProgressTime = video.currentTime;
+      lastProgressAt = Date.now();
+      var note = 'gap-jump ' + t.toFixed(1) + 's -> ' + to.toFixed(2) + 's (gap ' + gap.toFixed(2) + 's)';
+      console.log('[receiver]', note);
+      if (gapJumpNotes.length < 10) gapJumpNotes.push(note);
+    }
+
+    function startStallWatch() {
+      lastProgressTime = video.currentTime;
+      lastProgressAt = Date.now();
+      if (stallTimer) return;
+      stallTimer = setInterval(checkStall, STALL_POLL_MS);
+    }
+
+    function stopStallWatch() {
+      if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
     }
 
     // ── Overlays ─────────────────────────────────────────────────────────────

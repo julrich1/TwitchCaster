@@ -37,6 +37,7 @@ func main() {
 		http.ServeFile(w, r, "static/receiver.html")
 	})
 	http.HandleFunc("/current-stream/", twitchEndpoint.CurrentStream)
+	http.HandleFunc("/receiver-heartbeat/", twitchEndpoint.ReceiverHeartbeat)
 	http.HandleFunc("/receiver-session/", twitchEndpoint.ReceiverSession)
 	http.HandleFunc("/login", session.Login)
 	http.HandleFunc("/admin/streamlink-token", session.Protect(adminEndpoint.StreamlinkTokenPage))

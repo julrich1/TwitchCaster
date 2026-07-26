@@ -1,51 +1,101 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-<link rel="stylesheet" type="text/css" href="/static/style.css">
-<link rel="icon" type="image/x-icon" href="/static/favicon.ico"/>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TwitchCaster</title>
+<meta name="theme-color" content="#070710">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap">
+<link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body data-cast-url="{{.CastURL}}">
 {{- if .TokenAlert}}
-<a href="/admin/streamlink-token" style="display:block;background:#7a1f1f;color:#ffdada;text-decoration:none;text-align:center;padding:10px 16px;font-family:sans-serif;font-size:.95em;border-bottom:1px solid #a33;">
-  ⚠ {{.TokenAlert}}
-</a>
+<a class="alert" href="/admin/streamlink-token">{{.TokenAlert}}</a>
 {{- end}}
-<script>
-  function manualCast(element) {
-    const streamer = document.getElementsByName("sname")[0].value
-    castStreamer(streamer, element)
-  }
-  function castStreamer(streamer, element) {
-    const dropDownElement = document.getElementById("device_selection")
-    const ip = dropDownElement.options[dropDownElement.selectedIndex].value
-    fetch('/gui/cast/' + encodeURIComponent(streamer) + '/' + ip).catch(function() {})
-  }
-</script>
-<div class="logoContainer"><img class="logo" src="/static/twitch-logo.png"></div>
-<select id="device_selection">
-{{- range .Chromecasts}}
-  <option value="{{.IPAddress}}">{{.Name}}</option>
-{{- end}}
-</select><br>
-<div class="manualContainer"><input type="text" name="sname"><button onclick="manualCast(this);">Manual Cast</button></div>
-<div class="container">
-{{- range .Streamers}}
-  <div class="streamContainer">
-    <div onclick="castStreamer({{.Login}}, this);" class="thumbnailContainer">
-      <img src="{{.ThumbnailURL}}" class="thumbnailImage">
-      <div class="viewerCountContainer"><div class="viewerCount">{{.ViewerCountDisplay}} viewers</div></div>
-    </div>
-    <div class="streamDetailsContainer">
-      <div class="profileImageContainer">
-        <img src="{{.ProfileImageURL}}" class="profileImage">
-      </div>
-      <div class="textContainer">
-        <h3>{{.Title}}</h3>
-        <h4>{{.Name}}</h4>
-        <h4>{{.Game}}</h4>
-      </div>
+
+<header class="topbar">
+  <div class="bar">
+    <span class="wordmark">Twitch<b>caster</b></span>
+    <div class="bar-actions">
+      <button type="button" id="finderToggle" class="icon-btn" aria-expanded="false" aria-controls="finder" title="Find or cast a channel">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+        <span class="sr-only">Find or cast a channel</span>
+      </button>
+      <button type="button" id="refreshBtn" class="icon-btn" title="Refresh list">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4.5h-4.5"/></svg>
+        <span class="sr-only">Refresh list</span>
+      </button>
     </div>
   </div>
+
+  <div class="finder" id="finder" hidden>
+    <input type="text" id="finderInput" placeholder="Filter, or type any channel"
+           autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"
+           aria-label="Filter the list, or type any channel name to cast it">
+    <button type="button" id="finderClear" class="icon-btn" title="Clear">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      <span class="sr-only">Clear</span>
+    </button>
+  </div>
+  <div class="rooms" id="rooms" role="radiogroup" aria-label="Cast to room">
+  {{- range .Chromecasts}}
+    <button type="button" class="room" role="radio" aria-checked="false" data-ip="{{.IPAddress}}" data-name="{{.Name}}">
+      <i class="room-dot" aria-hidden="true"></i>{{.Name}}
+    </button>
+  {{- end}}
+  </div>
+  <div class="manual" id="manual" hidden></div>
+
+  <div class="onair" id="onair" hidden>
+    <span class="onair-tag"><i class="dot" aria-hidden="true"></i>On air</span>
+    <span class="onair-text" id="onairText"></span>
+    <button type="button" class="stop" id="stopBtn">Stop</button>
+  </div>
+</header>
+
+<main>
+<div class="grid" id="grid">
+{{- range .Streamers}}
+  <article class="card" tabindex="0" role="button"
+           data-login="{{.Login}}" data-name="{{.Name}}" data-game="{{.Game}}"
+           aria-label="Cast {{.Name}}">
+    <div class="shot">
+      <img class="shot-img" src="{{.ThumbnailURL}}" alt="" loading="lazy" decoding="async">
+      <span class="sweep" aria-hidden="true"></span>
+      <span class="badge badge-state"><i class="dot" aria-hidden="true"></i><span class="badge-label">Live</span></span>
+      <span class="badge badge-stats">
+        <span class="uptime" data-started="{{.StartedAt}}"></span>
+        <span class="viewers">{{.ViewerCountDisplay}}</span>
+      </span>
+    </div>
+    <div class="meta">
+      <img class="avatar" src="{{.ProfileImageURL}}" alt="" loading="lazy" decoding="async">
+      <div class="meta-text">
+        <h2 class="title">{{.Title}}</h2>
+        <p class="sub"><span class="chan">{{.Name}}</span><span class="sep" aria-hidden="true">·</span><span class="game">{{.Game}}</span></p>
+        <p class="status" aria-live="polite"></p>
+      </div>
+    </div>
+  </article>
 {{- end}}
 </div>
+
+<p class="no-match" id="noMatch" hidden>Nothing in the list matches.</p>
+
+{{- if not .Streamers}}
+<div class="empty">
+  <p class="empty-title">Nobody you follow is live.</p>
+  <p class="empty-sub">Type a channel name above to cast it anyway, or check for new streams.</p>
+  <button type="button" class="empty-btn" id="emptyRefresh">Refresh</button>
+</div>
+{{- end}}
+</main>
+
+<script src="/static/app.js"></script>
 </body>
 </html>

@@ -9,4 +9,5 @@ type OnlineStreamer struct {
 	Title           string
 	ThumbnailURL    string
 	ViewerCount     string
+	StartedAt       string // RFC3339 from Twitch; the GUI renders uptime client-side
 }
