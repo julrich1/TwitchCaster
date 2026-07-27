@@ -2,7 +2,7 @@ package endpoints
 
 import (
 	"bufio"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1314,10 +1314,17 @@ func (t *TwitchEndpoint) StreamInfo(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"title": title, "game": game, "viewerCount": viewerCount})
 }
 
-//go:embed templates/channel_list.html
-var channelListHTML string
+// The card markup is shared by the full page and the search fragment so the two
+// can never drift apart.
+//
+//go:embed templates/channel_list.html templates/channel_card.html templates/search_results.html
+var templateFS embed.FS
 
-var channelListTemplate = template.Must(template.New("channel_list").Parse(channelListHTML))
+var channelListTemplate = template.Must(template.ParseFS(templateFS,
+	"templates/channel_list.html", "templates/channel_card.html"))
+
+var searchResultsTemplate = template.Must(template.ParseFS(templateFS,
+	"templates/search_results.html", "templates/channel_card.html"))
 
 type channelListStreamer struct {
 	models.OnlineStreamer
@@ -1360,10 +1367,22 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 			data.TokenAlert = "No streamlink token configured — casts will get ads and lose enhanced streams. Set one up."
 		}
 	}
-	// Twitch caches live thumbnails behind a stable URL, so without a
-	// cache-buster a refreshed list shows the same stale frames.
+	data.Streamers = makeCardStreamers(onlineStreamers)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := channelListTemplate.Execute(w, data); err != nil {
+		log.Println("Error rendering channel list:", err)
+	}
+}
+
+// makeCardStreamers prepares streamers for the card template: readable viewer
+// counts, and a cache-buster on the thumbnail. Twitch caches live thumbnails
+// behind a stable URL, so without one a refreshed list shows the same stale
+// frames.
+func makeCardStreamers(streamers []models.OnlineStreamer) []channelListStreamer {
 	cacheBust := strconv.FormatInt(time.Now().Unix(), 10)
-	for _, user := range onlineStreamers {
+	cards := make([]channelListStreamer, 0, len(streamers))
+	for _, user := range streamers {
 		if user.ThumbnailURL != "" {
 			sep := "?"
 			if strings.Contains(user.ThumbnailURL, "?") {
@@ -1371,15 +1390,84 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 			}
 			user.ThumbnailURL += sep + "t=" + cacheBust
 		}
-		data.Streamers = append(data.Streamers, channelListStreamer{
+		cards = append(cards, channelListStreamer{
 			OnlineStreamer:     user,
 			ViewerCountDisplay: formatCount(user.ViewerCount),
 		})
 	}
+	return cards
+}
+
+const (
+	searchMinQueryLen = 3
+	searchMaxQueryLen = 50
+	searchResultLimit = 20
+	searchCacheTTL    = 60 * time.Second
+	searchCacheMax    = 100 // entries; the whole map is dropped past this
+)
+
+type searchCacheEntry struct {
+	streamers []models.OnlineStreamer
+	at        time.Time
+}
+
+// The GUI searches on every keystroke (debounced), so identical queries are the
+// common case — this keeps them off the Twitch API.
+var (
+	searchCacheMu sync.Mutex
+	searchCache   = map[string]searchCacheEntry{}
+)
+
+func cachedSearch(key string) ([]models.OnlineStreamer, bool) {
+	searchCacheMu.Lock()
+	defer searchCacheMu.Unlock()
+	entry, ok := searchCache[key]
+	if !ok || time.Since(entry.at) > searchCacheTTL {
+		return nil, false
+	}
+	return entry.streamers, true
+}
+
+func storeSearch(key string, streamers []models.OnlineStreamer) {
+	searchCacheMu.Lock()
+	defer searchCacheMu.Unlock()
+	if len(searchCache) >= searchCacheMax {
+		searchCache = map[string]searchCacheEntry{}
+	}
+	searchCache[key] = searchCacheEntry{streamers: streamers, at: time.Now()}
+}
+
+// SearchChannels renders live Twitch channels matching ?q= as an HTML fragment
+// of the same cards the channel list uses, which the GUI appends below its own
+// local filter results.
+func (t *TwitchEndpoint) SearchChannels(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(query) < searchMinQueryLen || len(query) > searchMaxQueryLen {
+		http.Error(w, "query must be 3-50 characters", http.StatusBadRequest)
+		return
+	}
+	// No user-token guard here, unlike the channel list: search/channels needs no
+	// scope, so an app token serves it. Search keeps working if the user token
+	// lapses mid-session, and the session cookie is still what gates the route.
+	key := strings.ToLower(query)
+	streamers, cached := cachedSearch(key)
+	if !cached {
+		log.Printf("[search] querying Twitch for %q\n", query)
+		var err error
+		streamers, err = t.twitchService.SearchChannels(query, searchResultLimit)
+		if err != nil {
+			log.Println("Error searching channels:", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		storeSearch(key, streamers)
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := channelListTemplate.Execute(w, data); err != nil {
-		log.Println("Error rendering channel list:", err)
+	w.Header().Set("Cache-Control", "no-store")
+	data := channelListData{Streamers: makeCardStreamers(streamers)}
+	if err := searchResultsTemplate.Execute(w, data); err != nil {
+		log.Println("Error rendering search results:", err)
 	}
 }
 

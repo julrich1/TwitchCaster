@@ -26,6 +26,7 @@ func main() {
 	twitchEndpoint := endpoints.NewTwitchEndpoint(config, authManager, tokenMonitor)
 	authEndpoint := endpoints.NewAuthEndpoint(config, authManager)
 	adminEndpoint := endpoints.NewAdminEndpoint(tokenMonitor)
+	pwaEndpoint := endpoints.NewPWAEndpoint(config.Settings.ChannelListURL)
 	session := endpoints.NewSessionAuth(config.Settings.AdminPassword)
 
 	// Endpoints the Chromecast receiver fetches stay unauthenticated; the
@@ -36,6 +37,7 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFile(w, r, "static/receiver.html")
 	})
+	http.HandleFunc("/manifest.webmanifest", pwaEndpoint.Manifest)
 	http.HandleFunc("/current-stream/", twitchEndpoint.CurrentStream)
 	http.HandleFunc("/receiver-heartbeat/", twitchEndpoint.ReceiverHeartbeat)
 	http.HandleFunc("/receiver-session/", twitchEndpoint.ReceiverSession)
@@ -44,6 +46,7 @@ func main() {
 	http.HandleFunc("/auth/twitch", session.Protect(authEndpoint.OAuthRedirect))
 	http.HandleFunc("/oauth", authEndpoint.OAuthCallback)
 	http.HandleFunc(config.Settings.ChannelListURL, session.Protect(twitchEndpoint.TwitchChannelList))
+	http.HandleFunc("/gui/search", session.Protect(twitchEndpoint.SearchChannels))
 	http.HandleFunc(config.Settings.CastURL, session.Protect(twitchEndpoint.CastTwitch))
 	http.HandleFunc("/stop-cast/", twitchEndpoint.StopCast)
 	http.HandleFunc("/stop-cast", twitchEndpoint.StopCast)

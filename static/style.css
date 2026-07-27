@@ -60,7 +60,9 @@ button { font: inherit; color: inherit; }
 
 .alert {
   display: block;
-  padding: 11px var(--pad-x);
+  /* Installed as a home-screen app the page can run edge-to-edge, so the first
+     thing on screen has to clear the status bar. Zero in a normal tab. */
+  padding: calc(11px + env(safe-area-inset-top)) var(--pad-x) 11px;
   background: #2a0f14;
   border-bottom: 1px solid rgba(255, 64, 64, .35);
   color: #ffc9c9;
@@ -77,6 +79,7 @@ button { font: inherit; color: inherit; }
   position: sticky;
   top: 0;
   z-index: 20;
+  padding-top: env(safe-area-inset-top);
   background: rgba(7, 7, 16, .93);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
@@ -202,21 +205,25 @@ button { font: inherit; color: inherit; }
 
 /* ── Room rail ─────────────────────────────────────────────────── */
 
+/* Wraps rather than scrolls: every device stays visible at a glance, so
+   picking a room is never hidden behind a swipe. On a handset the rail is
+   always several rows deep, so it becomes a grid whose columns are each sized
+   to their longest name — pills line up on both edges without being stretched
+   wider than they need. Wider screens drop back to a plain wrapping row
+   (see the breakpoints below): there, squeezing every device into 150px-floor
+   columns would wrap the names for no reason. */
 .rooms {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, max-content));
+  justify-content: start;
   gap: 8px;
   padding: 0 var(--pad-x) 11px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  -webkit-overflow-scrolling: touch;
 }
-.rooms::-webkit-scrollbar { display: none; }
 
 .room {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 7px;
-  flex: none;
+  justify-content: center;
   padding: 8px 13px;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -227,7 +234,7 @@ button { font: inherit; color: inherit; }
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: .09em;
-  white-space: nowrap;
+  text-align: center;
   cursor: pointer;
   transition: color .15s, border-color .15s, background .15s;
 }
@@ -238,14 +245,23 @@ button { font: inherit; color: inherit; }
   color: #fff;
 }
 
+/* The dot rides directly alongside the name, and the pair is centred together.
+   It collapses to zero width when hidden rather than holding its place: a
+   reserved-but-invisible dot pushed every label right of centre, and widened
+   the pills enough to wrap on a 360px handset. */
 .room-dot {
-  width: 5px; height: 5px;
+  flex: none;
+  width: 0; height: 5px;
   border-radius: 50%;
   background: var(--live);
   opacity: 0;
-  transition: opacity .2s;
+  transition: opacity .2s, width .2s, margin-right .2s;
 }
-.room.is-casting .room-dot { opacity: 1; }
+.room.is-casting .room-dot {
+  width: 5px;
+  margin-right: 7px;
+  opacity: 1;
+}
 
 /* ── On-air bar ────────────────────────────────────────────────── */
 
@@ -470,6 +486,33 @@ button { font: inherit; color: inherit; }
 .card.is-sending .status { color: var(--purple-lift); }
 .card.is-error .status { color: var(--live); }
 
+/* ── Twitch search results ─────────────────────────────────────── */
+
+/* A hairline and a quiet label are enough to say "these came from elsewhere" —
+   the cards themselves are identical, because they cast identically. */
+.search-results { border-top: 1px solid var(--line); }
+
+.section-title {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 18px var(--pad-x) 0;
+  font-family: var(--font-label);
+  font-weight: 700;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  color: var(--text-dim);
+}
+
+.search-results .grid { padding-top: 10px; }
+
+.search-status {
+  padding: 4px var(--pad-x) 28px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13.5px;
+}
+
 /* ── Empty / no-match ──────────────────────────────────────────── */
 
 .no-match,
@@ -514,6 +557,8 @@ button { font: inherit; color: inherit; }
     gap: 16px;
     padding: 18px var(--pad-x);
   }
+  /* Room for the devices to sit at their natural width — nothing to align. */
+  .rooms { display: flex; flex-wrap: wrap; }
 }
 
 @media (min-width: 1200px) {

@@ -2,7 +2,10 @@ package services
 
 import (
 	"errors"
+	"log"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"twitch-caster/auth"
 	"twitch-caster/models"
@@ -11,11 +14,13 @@ import (
 const followedStreamsURL = "https://api.twitch.tv/helix/streams/followed"
 const streamsURL = "https://api.twitch.tv/helix/streams"
 const usersURL = "https://api.twitch.tv/helix/users"
+const searchChannelsURL = "https://api.twitch.tv/helix/search/channels"
 
 var endpoints = map[string]endpoint{
 	"TWITCH_FOLLOWED_STREAMS": {"GET", followedStreamsURL},
 	"TWITCH_STREAMS":          {"GET", streamsURL},
 	"TWITCH_USERS":            {"GET", usersURL},
+	"TWITCH_SEARCH_CHANNELS":  {"GET", searchChannelsURL},
 }
 
 type endpoint struct {
@@ -116,24 +121,37 @@ func (t *TwitchService) fetchUsers(onlineUsers models.OnlineUsersResponse) (mode
 	return usersResponse, nil
 }
 
-// FetchStreamByLogin returns the current title, game, and viewer count for a
-// single stream identified by the streamer's login name. Returns empty strings
-// and zero if the stream is offline or the login is not found.
-func (t *TwitchService) FetchStreamByLogin(login string) (title, game string, viewerCount int, err error) {
+// fetchStreams looks up live streams by login name. Twitch accepts up to 100
+// user_login values per call, and silently omits anyone who is offline.
+func (t *TwitchService) fetchStreams(logins []string) (models.OnlineUsersResponse, error) {
 	var resp models.OnlineUsersResponse
+	if len(logins) == 0 {
+		return resp, nil
+	}
 	ep := endpoints["TWITCH_STREAMS"]
 
 	headers := map[string]string{}
 	t.appendCommonHeaders(headers)
-	if err = t.appendTwitchAuthHeader(headers); err != nil {
-		return "", "", 0, err
+	if err := t.appendTwitchAuthHeader(headers); err != nil {
+		return resp, err
 	}
 
 	req := Request{ep.method, ep.url, headers, map[string][]string{
-		"user_login": {login},
-		"first":      {"1"},
+		"user_login": logins,
+		"first":      {strconv.Itoa(len(logins))},
 	}}
-	if err = t.makeAuthedRequest(req, &resp); err != nil {
+	if err := t.makeAuthedRequest(req, &resp); err != nil {
+		return resp, err
+	}
+	return resp, nil
+}
+
+// FetchStreamByLogin returns the current title, game, and viewer count for a
+// single stream identified by the streamer's login name. Returns empty strings
+// and zero if the stream is offline or the login is not found.
+func (t *TwitchService) FetchStreamByLogin(login string) (title, game string, viewerCount int, err error) {
+	resp, err := t.fetchStreams([]string{login})
+	if err != nil {
 		return "", "", 0, err
 	}
 	if len(resp.Data) == 0 {
@@ -141,6 +159,98 @@ func (t *TwitchService) FetchStreamByLogin(login string) (title, game string, vi
 	}
 	d := resp.Data[0]
 	return d.Title, d.GameName, d.ViewerCount, nil
+}
+
+// liveStream is what a streams lookup contributes to a search result.
+type liveStream struct {
+	name        string
+	title       string
+	game        string
+	thumbnail   string
+	startedAt   string
+	viewerCount int
+}
+
+// SearchChannels returns live channels matching a search phrase, ordered by
+// Twitch's own relevance ranking.
+//
+// search/channels reports neither a viewer count nor a frame of the stream, so
+// the logins it returns get a second, batched streams lookup to fill the cards
+// out. That enrichment is best-effort: if it fails we still show the channels,
+// just without a thumbnail or viewer count.
+func (t *TwitchService) SearchChannels(query string, limit int) ([]models.OnlineStreamer, error) {
+	var searchResponse models.SearchChannelsResponse
+	ep := endpoints["TWITCH_SEARCH_CHANNELS"]
+
+	headers := map[string]string{}
+	t.appendCommonHeaders(headers)
+	if err := t.appendTwitchAuthHeader(headers); err != nil {
+		return nil, err
+	}
+
+	req := Request{ep.method, ep.url, headers, map[string][]string{
+		"query":     {query},
+		"live_only": {"true"},
+		"first":     {strconv.Itoa(limit)},
+	}}
+	if err := t.makeAuthedRequest(req, &searchResponse); err != nil {
+		return nil, err
+	}
+
+	logins := make([]string, 0, len(searchResponse.Data))
+	for _, channel := range searchResponse.Data {
+		// live_only should have handled this; belt and braces, since an offline
+		// channel is not castable.
+		if channel.IsLive && channel.BroadcasterLogin != "" {
+			logins = append(logins, channel.BroadcasterLogin)
+		}
+	}
+
+	streamByLogin := make(map[string]liveStream)
+	if streams, err := t.fetchStreams(logins); err != nil {
+		log.Println("Search enrichment lookup failed, falling back to search data:", err)
+	} else {
+		for _, s := range streams.Data {
+			streamByLogin[strings.ToLower(s.UserLogin)] = liveStream{
+				name:        s.UserName,
+				title:       s.Title,
+				game:        s.GameName,
+				thumbnail:   s.ThumbnailURL,
+				startedAt:   s.StartedAt,
+				viewerCount: s.ViewerCount,
+			}
+		}
+	}
+
+	streamers := make([]models.OnlineStreamer, 0, len(logins))
+	for _, channel := range searchResponse.Data {
+		if !channel.IsLive || channel.BroadcasterLogin == "" {
+			continue
+		}
+		streamer := models.OnlineStreamer{
+			Login:           channel.BroadcasterLogin,
+			Name:            channel.DisplayName,
+			Game:            models.GameOrUnknown(channel.GameName),
+			ProfileImageURL: channel.ThumbnailURL,
+			Title:           channel.Title,
+			ViewerCount:     "0",
+			StartedAt:       channel.StartedAt,
+		}
+		// The streams endpoint is the fresher of the two, so let it win wherever
+		// the two overlap.
+		if s, ok := streamByLogin[strings.ToLower(channel.BroadcasterLogin)]; ok {
+			if s.name != "" {
+				streamer.Name = s.name
+			}
+			streamer.Title = s.title
+			streamer.Game = models.GameOrUnknown(s.game)
+			streamer.ThumbnailURL = models.SizeThumbnail(s.thumbnail)
+			streamer.ViewerCount = strconv.Itoa(s.viewerCount)
+			streamer.StartedAt = s.startedAt
+		}
+		streamers = append(streamers, streamer)
+	}
+	return streamers, nil
 }
 
 func (t *TwitchService) appendTwitchAuthHeader(headers map[string]string) error {

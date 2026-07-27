@@ -20,26 +20,33 @@ type OnlineUsersResponse struct {
 	} `json:"data"`
 }
 
+// SizeThumbnail fills in Twitch's {width}/{height} placeholders. Cards are
+// 300-400px wide, so 640x360 is already oversampled — the old 1200x674 was
+// several times the bytes for no visible gain on a phone.
+func SizeThumbnail(thumbnailURL string) string {
+	thumbnailURL = strings.Replace(thumbnailURL, "{width}", "640", -1)
+	return strings.Replace(thumbnailURL, "{height}", "360", -1)
+}
+
+// GameOrUnknown keeps the card's game line from rendering blank.
+func GameOrUnknown(gameName string) string {
+	if gameName == "" {
+		return "Unknown"
+	}
+	return gameName
+}
+
 // MakeOnlineStreamers converts an OnlineUsersResponse into a slice of OnlineStreamers
 func (onlineUsersResponse OnlineUsersResponse) MakeOnlineStreamers(streamerIDToThumbnailMap map[string]string) []OnlineStreamer {
 	onlineStreamers := make([]OnlineStreamer, 0, len(onlineUsersResponse.Data))
 	for _, user := range onlineUsersResponse.Data {
-		// Cards are 300-400px wide, so 640x360 is already oversampled — the old
-		// 1200x674 was several times the bytes for no visible gain on a phone.
-		thumbnailURL := strings.Replace(user.ThumbnailURL, "{width}", "640", -1)
-		thumbnailURL = strings.Replace(thumbnailURL, "{height}", "360", -1)
-		gameName := user.GameName
-		if gameName == "" {
-			gameName = "Unknown"
-		}
-
 		onlineStreamer := OnlineStreamer{
 			Login:           user.UserLogin,
 			Name:            user.UserName,
-			Game:            gameName,
+			Game:            GameOrUnknown(user.GameName),
 			ProfileImageURL: streamerIDToThumbnailMap[user.UserID],
 			Title:           user.Title,
-			ThumbnailURL:    thumbnailURL,
+			ThumbnailURL:    SizeThumbnail(user.ThumbnailURL),
 			ViewerCount:     strconv.Itoa(user.ViewerCount),
 			StartedAt:       user.StartedAt,
 		}

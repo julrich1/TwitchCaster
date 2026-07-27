@@ -14,6 +14,8 @@
   var POLL_MS = 1000;
   var STALE_MS = 60000;          // hidden longer than this → refresh on return
   var ERROR_CLEAR_MS = 8000;
+  var SEARCH_DEBOUNCE_MS = 350;  // typing settles before we bother Twitch
+  var SEARCH_MIN_CHARS = 3;      // the server rejects anything shorter
   var ROOM_KEY = 'twitchcaster.room';
 
   var CAST_URL = document.body.dataset.castUrl || '/gui/cast/';
@@ -29,6 +31,10 @@
   var manualEl = document.getElementById('manual');
   var refreshBtn = document.getElementById('refreshBtn');
   var mainEl = document.querySelector('main');
+  var searchEl = document.getElementById('searchResults');
+  var searchGrid = document.getElementById('searchGrid');
+  var searchStatus = document.getElementById('searchStatus');
+  var searchTitle = searchEl.querySelector('.section-title');
 
   // Bumping this cancels any in-flight confirmation poll, so tapping a second
   // card (or Stop) never lets a stale poll overwrite the newer state.
@@ -37,11 +43,22 @@
   var hiddenAt = 0;
   var errorTimer = null;
 
+  // Same idea as castGen, for searches: only the newest one may render.
+  var searchGen = 0;
+  var searchTimer = null;
+  var searchAbort = null;
+  var searchCache = {};   // query → fragment HTML, so backspacing is instant
+
   /* ── helpers ─────────────────────────────────────────────────── */
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function hlsID(ip) { return ip.replace(/\./g, '-'); }
+  // cards() is every card on the page — followed and searched alike — so cast
+  // state (sending / on air / error) lands on whichever one was tapped. The
+  // finder's text filter only ever applies to localCards().
   function cards() { return Array.prototype.slice.call(document.querySelectorAll('.card')); }
+  function localCards() { return Array.prototype.slice.call(document.querySelectorAll('#grid .card')); }
+  function searchCards() { return Array.prototype.slice.call(searchGrid.querySelectorAll('.card')); }
   function roomButtons() { return Array.prototype.slice.call(roomsEl.querySelectorAll('.room')); }
   function selectedRoom() { return roomsEl.querySelector('.room[aria-checked="true"]'); }
 
@@ -138,7 +155,7 @@
   // Manual casts have no card to annotate, so their progress and failures are
   // reported in the finder's own row instead.
   function setManualStatus(text, isError) {
-    if (!text) { renderManual(finderInput.value.trim()); return; }
+    if (!text) { renderManual(); return; }
     manualEl.textContent = '';
     var msg = document.createElement('p');
     msg.className = 'manual-msg' + (isError ? ' is-error' : '');
@@ -171,7 +188,9 @@
     buzz(15);
     clearTransmitStates();
     if (card) {
-      card.closest('.grid').classList.add('is-transmitting');
+      // Every grid, not just the card's own: with search results on screen the
+      // followed list would otherwise stay bright beside the sending card.
+      document.querySelectorAll('.grid').forEach(function (g) { g.classList.add('is-transmitting'); });
       setCardState(card, 'sending', 'Sending → ' + roomName);
     } else {
       setManualStatus('Sending ' + login + ' → ' + roomName, false);
@@ -246,14 +265,25 @@
 
   /* ── finder: filters the list, and casts what it can't find ──── */
 
-  // Offered only when the filter turns up nothing — while there are matches the
-  // user is browsing, not naming a channel, and the row would just be noise.
-  function renderManual(query, matches) {
+  function visibleLocalCards() {
+    return localCards().filter(function (c) { return !c.classList.contains('is-hidden'); });
+  }
+
+  // Offered only when neither the filter nor the Twitch search turned up the
+  // typed channel — while there are matches the user is browsing, not naming a
+  // channel, and the row would just be noise. It stays reachable for offline
+  // channels, which the live-only search never returns.
+  function renderManual() {
+    var query = finderInput.value.trim();
     var room = selectedRoom();
     var valid = /^[a-zA-Z0-9_]{2,25}$/.test(query);
+    var matches = visibleLocalCards().length;
+    var searched = searchCards().some(function (c) {
+      return c.dataset.login === query.toLowerCase();
+    });
 
     manualEl.textContent = '';
-    if (!valid || matches > 0 || !room) { manualEl.hidden = true; return; }
+    if (!valid || matches > 0 || searched || !room) { manualEl.hidden = true; return; }
 
     var btn = document.createElement('button');
     btn.type = 'button';
@@ -276,7 +306,7 @@
   function applyFilter() {
     var query = finderInput.value.trim();
     var q = query.toLowerCase();
-    var all = cards();
+    var all = localCards();
     var shown = 0;
 
     all.forEach(function (c) {
@@ -286,12 +316,113 @@
       if (hit) shown++;
     });
 
-    renderManual(query, shown);
+    scheduleSearch(query);
+    renderFallbacks(shown, all.length, q);
+  }
 
-    // The manual row already says what to do about an empty result, so don't
-    // say it twice.
+  // The manual row and the Twitch results both answer "the list doesn't have
+  // it", so the plain no-match line only speaks when neither of them does.
+  function renderFallbacks(shown, total, q) {
+    renderManual();
     var noMatch = document.getElementById('noMatch');
-    if (noMatch) noMatch.hidden = !(q && shown === 0 && all.length > 0 && manualEl.hidden);
+    if (noMatch) {
+      noMatch.hidden = !(q && shown === 0 && total > 0 && manualEl.hidden && !searchCards().length);
+    }
+  }
+
+  /* ── Twitch search: what the local list couldn't answer ───────── */
+
+  // The heading names a group of cards, so it only appears once there are some.
+  function setSearchStatus(text) {
+    searchStatus.textContent = text || '';
+    searchStatus.hidden = !text;
+    searchTitle.hidden = !searchCards().length;
+  }
+
+  function clearSearch() {
+    searchGen++;
+    if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+    if (searchAbort) { searchAbort.abort(); searchAbort = null; }
+    searchGrid.textContent = '';
+    setSearchStatus('');
+    searchEl.hidden = true;
+  }
+
+  function scheduleSearch(query) {
+    if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+    if (query.length < SEARCH_MIN_CHARS) { clearSearch(); return; }
+
+    var cached = searchCache[query.toLowerCase()];
+    if (cached !== undefined) {
+      // Claim the generation so a slower request still in flight can't land on
+      // top of what we're about to render.
+      searchGen++;
+      if (searchAbort) { searchAbort.abort(); searchAbort = null; }
+      renderSearch(cached, query);
+      return;
+    }
+
+    searchTimer = setTimeout(function () { runSearch(query); }, SEARCH_DEBOUNCE_MS);
+  }
+
+  function runSearch(query) {
+    var gen = ++searchGen;
+    if (searchAbort) searchAbort.abort();
+    searchAbort = typeof AbortController === 'function' ? new AbortController() : null;
+
+    searchEl.hidden = false;
+    setSearchStatus('Searching Twitch…');
+
+    fetch('/gui/search?q=' + encodeURIComponent(query), {
+      cache: 'no-store',
+      signal: searchAbort ? searchAbort.signal : undefined
+    }).then(function (res) {
+      if (!res.ok) throw new Error('search failed: ' + res.status);
+      return res.text();
+    }).then(function (html) {
+      if (gen !== searchGen) return;
+      searchCache[query.toLowerCase()] = html;
+      renderSearch(html, query);
+    }).catch(function (err) {
+      // An aborted request is a newer search taking over, not a failure.
+      if (gen !== searchGen || (err && err.name === 'AbortError')) return;
+      searchGrid.textContent = '';
+      setSearchStatus('Twitch search is unavailable right now.');
+      searchEl.hidden = false;
+    });
+  }
+
+  function renderSearch(html, query) {
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    var found = Array.prototype.slice.call(doc.querySelectorAll('.card'));
+
+    // Anyone already in the followed list is on screen above; showing them
+    // twice just makes the results look padded.
+    var known = {};
+    localCards().forEach(function (c) { known[c.dataset.login] = true; });
+
+    searchGrid.textContent = '';
+    found.forEach(function (c) {
+      if (known[c.dataset.login]) return;
+      searchGrid.appendChild(document.importNode(c, true));
+    });
+
+    var count = searchCards().length;
+    var localMatches = visibleLocalCards().length;
+
+    // Coming up empty is only worth saying when the list didn't answer either;
+    // otherwise the user already has what they were looking for.
+    if (!count && localMatches) {
+      searchEl.hidden = true;
+      setSearchStatus('');
+    } else {
+      searchEl.hidden = false;
+      setSearchStatus(count ? '' : 'Nobody live on Twitch matches “' + query + '”.');
+    }
+
+    renderUptimes();
+    syncCastUI();
+    renderFallbacks(localMatches, localCards().length, query.toLowerCase());
   }
 
   function toggleFinder(open) {
@@ -413,9 +544,13 @@
     if (e.key === 'Escape') { toggleFinder(false); return; }
     if (e.key !== 'Enter') return;
     e.preventDefault();
-    var visible = cards().filter(function (c) { return !c.classList.contains('is-hidden'); });
+    // A unique hit is worth casting wherever it came from — the followed list
+    // or the Twitch results.
+    var visible = visibleLocalCards().concat(searchCards());
     var typed = finderInput.value.trim();
-    if (visible.length === 1) castChannel(visible[0].dataset.login, visible[0]);
+    var exact = visible.filter(function (c) { return c.dataset.login === typed.toLowerCase(); })[0];
+    if (exact) castChannel(exact.dataset.login, exact);
+    else if (visible.length === 1) castChannel(visible[0].dataset.login, visible[0]);
     else if (!manualEl.hidden) castChannel(typed.toLowerCase(), null);
   });
 
@@ -430,6 +565,6 @@
   probeRooms();
   // With nobody live, casting by name is the only thing left to do — so put the
   // field in front of the user rather than behind a button.
-  if (!cards().length) toggleFinder(true);
+  if (!localCards().length) toggleFinder(true);
   setInterval(renderUptimes, 60000);
 })();

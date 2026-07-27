@@ -1,0 +1,23 @@
+{{define "card"}}
+  <article class="card" tabindex="0" role="button"
+           data-login="{{.Login}}" data-name="{{.Name}}" data-game="{{.Game}}"
+           aria-label="Cast {{.Name}}">
+    <div class="shot">
+      <img class="shot-img" src="{{.ThumbnailURL}}" alt="" loading="lazy" decoding="async">
+      <span class="sweep" aria-hidden="true"></span>
+      <span class="badge badge-state"><i class="dot" aria-hidden="true"></i><span class="badge-label">Live</span></span>
+      <span class="badge badge-stats">
+        <span class="uptime" data-started="{{.StartedAt}}"></span>
+        <span class="viewers">{{.ViewerCountDisplay}}</span>
+      </span>
+    </div>
+    <div class="meta">
+      <img class="avatar" src="{{.ProfileImageURL}}" alt="" loading="lazy" decoding="async">
+      <div class="meta-text">
+        <h2 class="title">{{.Title}}</h2>
+        <p class="sub"><span class="chan">{{.Name}}</span><span class="sep" aria-hidden="true">·</span><span class="game">{{.Game}}</span></p>
+        <p class="status" aria-live="polite"></p>
+      </div>
+    </div>
+  </article>
+{{end}}

@@ -7,7 +7,11 @@
 <meta name="theme-color" content="#070710">
 <meta name="color-scheme" content="dark">
 <meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TwitchCaster">
+<link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap">
@@ -60,29 +64,7 @@
 
 <main>
 <div class="grid" id="grid">
-{{- range .Streamers}}
-  <article class="card" tabindex="0" role="button"
-           data-login="{{.Login}}" data-name="{{.Name}}" data-game="{{.Game}}"
-           aria-label="Cast {{.Name}}">
-    <div class="shot">
-      <img class="shot-img" src="{{.ThumbnailURL}}" alt="" loading="lazy" decoding="async">
-      <span class="sweep" aria-hidden="true"></span>
-      <span class="badge badge-state"><i class="dot" aria-hidden="true"></i><span class="badge-label">Live</span></span>
-      <span class="badge badge-stats">
-        <span class="uptime" data-started="{{.StartedAt}}"></span>
-        <span class="viewers">{{.ViewerCountDisplay}}</span>
-      </span>
-    </div>
-    <div class="meta">
-      <img class="avatar" src="{{.ProfileImageURL}}" alt="" loading="lazy" decoding="async">
-      <div class="meta-text">
-        <h2 class="title">{{.Title}}</h2>
-        <p class="sub"><span class="chan">{{.Name}}</span><span class="sep" aria-hidden="true">·</span><span class="game">{{.Game}}</span></p>
-        <p class="status" aria-live="polite"></p>
-      </div>
-    </div>
-  </article>
-{{- end}}
+{{- range .Streamers}}{{template "card" .}}{{end}}
 </div>
 
 <p class="no-match" id="noMatch" hidden>Nothing in the list matches.</p>
@@ -95,6 +77,14 @@
 </div>
 {{- end}}
 </main>
+
+{{- /* Outside <main> on purpose: a background refresh swaps main's children
+       wholesale, which would otherwise blank the results mid-search. */}}
+<section class="search-results" id="searchResults" hidden>
+  <h2 class="section-title">More on Twitch</h2>
+  <div class="grid" id="searchGrid"></div>
+  <p class="search-status" id="searchStatus" hidden></p>
+</section>
 
 <script src="/static/app.js"></script>
 </body>
