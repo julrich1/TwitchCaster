@@ -342,8 +342,13 @@ button { font: inherit; color: inherit; }
 
 /* ── Card ──────────────────────────────────────────────────────── */
 
+/* Column flex so the meta block can absorb whatever extra height the grid row
+   hands this card, and pin the channel/game line to the bottom of it. Grid rows
+   size to their tallest card either way; this decides where that slack lands. */
 .card {
   position: relative;
+  display: flex;
+  flex-direction: column;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -361,6 +366,7 @@ button { font: inherit; color: inherit; }
 
 .shot {
   position: relative;
+  flex: none; /* keep the 16:9 box exact; the meta block takes the slack */
   aspect-ratio: 16 / 9;
   background: var(--surface-2);
 }
@@ -404,16 +410,26 @@ button { font: inherit; color: inherit; }
 }
 
 .meta {
+  flex: 1;
   display: flex;
-  gap: 10px;
+  flex-direction: column;
   padding: 11px 12px 13px;
 }
 
+/* The avatar sits on the thumbnail rather than beside the title. Alongside it,
+   the avatar and its gap cost ~48px of every title line — on a 300px card that
+   is a sixth of the width, charged on both lines — which is most of why long
+   titles were getting cut. Here it costs nothing, and the badges (top-left,
+   bottom-right) leave this corner free. */
 .avatar {
+  position: absolute;
+  left: 8px; bottom: 8px;
   width: 38px; height: 38px;
-  flex: none;
   border-radius: 50%;
   background: var(--surface-2);
+  /* Reads against any thumbnail, in the badges' own dark glass. */
+  border: 2px solid rgba(7, 7, 16, .8);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .45);
 }
 
 .meta-text { min-width: 0; }
@@ -425,14 +441,23 @@ button { font: inherit; color: inherit; }
   line-height: 1.35;
   color: var(--text);
   display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  /* No reserved height: a fixed three-line floor charged every card for space
+     its title never used, which is what left the big gap under a one-line
+     title. The row still sizes to its tallest card, so the slack is whatever
+     that row actually needs — none at all when every title is one line. */
+  /* Split a short title evenly rather than a full line plus an orphan word. */
+  text-wrap: balance;
 }
 
+/* margin-top:auto pins this to the bottom of the card, so channel/game lines
+   stay level across a row however tall each title is. .status takes it too,
+   since it replaces .sub while a cast is starting or has failed. */
 .sub {
-  margin: 0;
+  margin: auto 0 0;
   font-size: 12.5px;
   color: var(--text-dim);
   overflow: hidden;
@@ -444,7 +469,7 @@ button { font: inherit; color: inherit; }
 
 .status {
   display: none;
-  margin: 0;
+  margin: auto 0 0;
   font-family: var(--font-label);
   font-weight: 700;
   font-size: 9.5px;
