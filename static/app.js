@@ -12,7 +12,9 @@
 
   var CAST_TIMEOUT_MS = 45000;   // generous: streamlink + ffmpeg startup on a Pi
   var POLL_MS = 1000;
-  var STALE_MS = 60000;          // hidden longer than this → refresh on return
+  var STALE_MS = 60000;          // list older than this → refresh on return
+  var REFRESH_TIMEOUT_MS = 10000; // generous: the server calls Twitch to render
+  var PROBE_MIN_GAP_MS = 5000;   // focus can fire in bursts; don't re-probe each time
   var ERROR_CLEAR_MS = 8000;
   var SEARCH_DEBOUNCE_MS = 350;  // typing settles before we bother Twitch
   var SEARCH_MIN_CHARS = 3;      // the server rejects anything shorter
@@ -40,7 +42,7 @@
   // card (or Stop) never lets a stale poll overwrite the newer state.
   var castGen = 0;
   var onAirByIP = {};   // device IP → login currently published for it
-  var hiddenAt = 0;
+  var lastProbeAt = 0;
   var errorTimer = null;
 
   // Same idea as castGen, for searches: only the newest one may render.
@@ -142,6 +144,7 @@
   }
 
   function probeRooms() {
+    lastProbeAt = Date.now();
     return Promise.all(roomButtons().map(function (b) {
       return currentStream(b.dataset.ip).then(function (s) {
         if (s && s.login) onAirByIP[b.dataset.ip] = s.login;
@@ -457,13 +460,24 @@
   /* ── refresh ─────────────────────────────────────────────────── */
 
   var refreshing = false;
+  // When the list was last known good. The server rendered it into this page, so
+  // load counts as fresh. This — not whether we caught the page going hidden —
+  // decides whether returning to the app needs a full refetch.
+  var listFreshAt = Date.now();
 
   function refreshList() {
     if (refreshing) return Promise.resolve();
     refreshing = true;
     refreshBtn.classList.add('is-spinning');
 
-    return fetch(location.href, { cache: 'no-store', headers: { Accept: 'text/html' } })
+    // Without a deadline, a request that never settles (dropped wifi, server
+    // restarting) leaves `refreshing` stuck true. The guard above then rejects
+    // every later refresh for the life of the page and the button spins forever,
+    // with a reload the only way out.
+    var ctl = new AbortController();
+    var expiry = setTimeout(function () { ctl.abort(); }, REFRESH_TIMEOUT_MS);
+
+    return fetch(location.href, { cache: 'no-store', headers: { Accept: 'text/html' }, signal: ctl.signal })
       .then(function (res) {
         // A 401 login page or the /auth/twitch bounce means the session or the
         // Twitch token needs attention — hand the whole page over to the server.
@@ -482,12 +496,14 @@
           Array.prototype.slice.call(document.importNode(freshMain, true).childNodes)
         );
 
+        listFreshAt = Date.now();
         renderUptimes();
         applyFilter();
         return probeRooms();
       })
       .catch(function () { /* keep the list we already have */ })
       .then(function () {
+        clearTimeout(expiry);
         refreshing = false;
         refreshBtn.classList.remove('is-spinning');
       });
@@ -554,11 +570,26 @@
     else if (!manualEl.hidden) castChannel(typed.toLowerCase(), null);
   });
 
-  document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { hiddenAt = Date.now(); return; }
-    if (hiddenAt && Date.now() - hiddenAt > STALE_MS) refreshList();
-    else probeRooms();
-  });
+  // Coming back to the app has to re-check the world. This used to be gated on
+  // hiddenAt, stamped when the page went hidden — but an app frozen or restored
+  // without dispatching that event arrives with hiddenAt still 0, so the gate
+  // fell through to probeRooms(), which only syncs cast state and never refetches
+  // the channel list. Keying off when the list was last known fresh drops the
+  // dependency on having caught the outbound event at all.
+  function resume() {
+    if (document.hidden) return;
+    if (Date.now() - listFreshAt > STALE_MS) { refreshList(); return; }
+    if (Date.now() - lastProbeAt > PROBE_MIN_GAP_MS) probeRooms();
+  }
+
+  document.addEventListener('visibilitychange', resume);
+  // visibilitychange alone isn't enough: an installed PWA restored from the
+  // back/forward cache can come back without firing it. pageshow does fire on
+  // that path, and focus covers switching windows on the desktop, where the page
+  // never became hidden in the first place.
+  window.addEventListener('pageshow', resume);
+  window.addEventListener('focus', resume);
+  window.addEventListener('online', resume);
 
   restoreRoom();
   renderUptimes();
