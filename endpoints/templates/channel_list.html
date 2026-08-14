@@ -17,7 +17,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap">
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body data-cast-url="{{.CastURL}}">
+<body data-cast-url="{{.CastURL}}" data-rendered-at="{{.RenderedAt}}">
 {{- if .TokenAlert}}
 <a class="alert" href="/admin/streamlink-token">{{.TokenAlert}}</a>
 {{- end}}

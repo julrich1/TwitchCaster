@@ -15,6 +15,8 @@
   var STALE_MS = 60000;          // list older than this → refresh on return
   var REFRESH_TIMEOUT_MS = 10000; // generous: the server calls Twitch to render
   var PROBE_MIN_GAP_MS = 5000;   // focus can fire in bursts; don't re-probe each time
+  var RETRY_BASE_MS = 5000;      // first retry after a failed refresh
+  var RETRY_MAX_MS = 60000;      // backoff ceiling while the server stays unreachable
   var ERROR_CLEAR_MS = 8000;
   var SEARCH_DEBOUNCE_MS = 350;  // typing settles before we bother Twitch
   var SEARCH_MIN_CHARS = 3;      // the server rejects anything shorter
@@ -460,10 +462,29 @@
   /* ── refresh ─────────────────────────────────────────────────── */
 
   var refreshing = false;
-  // When the list was last known good. The server rendered it into this page, so
-  // load counts as fresh. This — not whether we caught the page going hidden —
-  // decides whether returning to the app needs a full refetch.
-  var listFreshAt = Date.now();
+  // When the list was last known good. The server stamps its render time into
+  // <body>, so HTML replayed from the browser's HTTP cache ages correctly
+  // instead of counting as fresh just because this script re-ran. Clamped to
+  // now: a server clock running ahead must not push freshness into the future.
+  var listFreshAt = Math.min(Date.now(),
+    parseInt(document.body.dataset.renderedAt, 10) || Date.now());
+
+  var retryDelayMs = RETRY_BASE_MS;
+  var retryTimer = null;
+
+  // A refresh that fails (wifi still re-associating after wake, server mid-
+  // restart) used to fail silently and stay failed until the next lifecycle
+  // event. Retry on a doubling backoff while the page is visible; a successful
+  // refresh resets it. A retry that lands while hidden just skips — the
+  // visibilitychange on return triggers the refetch instead.
+  function scheduleRetry() {
+    if (retryTimer) return;
+    retryTimer = setTimeout(function () {
+      retryTimer = null;
+      if (!document.hidden) refreshList();
+    }, retryDelayMs);
+    retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
+  }
 
   function refreshList() {
     if (refreshing) return Promise.resolve();
@@ -476,12 +497,13 @@
     // with a reload the only way out.
     var ctl = new AbortController();
     var expiry = setTimeout(function () { ctl.abort(); }, REFRESH_TIMEOUT_MS);
+    var ok = false;
 
     return fetch(location.href, { cache: 'no-store', headers: { Accept: 'text/html' }, signal: ctl.signal })
       .then(function (res) {
         // A 401 login page or the /auth/twitch bounce means the session or the
         // Twitch token needs attention — hand the whole page over to the server.
-        if (!res.ok || res.redirected) { location.reload(); return null; }
+        if (!res.ok || res.redirected) { ok = true; location.reload(); return null; }
         return res.text();
       })
       .then(function (html) {
@@ -497,6 +519,7 @@
         );
 
         listFreshAt = Date.now();
+        ok = true;
         renderUptimes();
         applyFilter();
         return probeRooms();
@@ -506,6 +529,12 @@
         clearTimeout(expiry);
         refreshing = false;
         refreshBtn.classList.remove('is-spinning');
+        if (ok) {
+          retryDelayMs = RETRY_BASE_MS;
+          if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+        } else {
+          scheduleRetry();
+        }
       });
   }
 
@@ -590,6 +619,9 @@
   window.addEventListener('pageshow', resume);
   window.addEventListener('focus', resume);
   window.addEventListener('online', resume);
+  // Page Lifecycle: a tab unfrozen without a visibility change (frozen while
+  // visible) fires only this. Costs nothing to cover.
+  document.addEventListener('resume', resume);
 
   restoreRoom();
   renderUptimes();

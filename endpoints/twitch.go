@@ -1336,10 +1336,15 @@ type channelListData struct {
 	Streamers   []channelListStreamer
 	TokenAlert  string // non-empty → warning banner at the top of the page
 	CastURL     string // cast route prefix, so static/app.js doesn't hard-code it
+	RenderedAt  int64  // unix ms; lets app.js age the list even if the HTML came from a cache
 }
 
 // TwitchChannelList is the entry point for an HTTP channel list request
 func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Request) {
+	// no-store, or a PWA launch / back-navigation can render this page from the
+	// browser's HTTP cache — app.js would then stamp hours-old HTML as fresh and
+	// skip the refetch on return.
+	w.Header().Set("Cache-Control", "no-store")
 	if !t.twitchService.HasUserToken() {
 		http.Redirect(w, r, "/auth/twitch", http.StatusFound)
 		return
@@ -1358,7 +1363,7 @@ func (t *TwitchEndpoint) TwitchChannelList(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	data := channelListData{Chromecasts: t.chromecasts, CastURL: t.castURL}
+	data := channelListData{Chromecasts: t.chromecasts, CastURL: t.castURL, RenderedAt: time.Now().UnixMilli()}
 	if t.tokenMonitor != nil {
 		switch t.tokenMonitor.Status().State {
 		case TokenInvalid:

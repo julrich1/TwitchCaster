@@ -31,7 +31,14 @@ func main() {
 
 	// Endpoints the Chromecast receiver fetches stay unauthenticated; the
 	// browser-facing GUI/admin routes sit behind the session cookie.
-	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+	// no-cache (revalidate, not "don't cache"): without it browsers cache app.js
+	// heuristically and can run a stale copy for days after a deploy. FileServer
+	// sends Last-Modified, so revalidation is a cheap 304.
+	staticFiles := http.StripPrefix("/static/", http.FileServer(http.Dir("static")))
+	http.Handle("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		staticFiles.ServeHTTP(w, r)
+	}))
 	http.HandleFunc("/receiver", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Receiver page loaded from %s", r.RemoteAddr)
 		w.Header().Set("Cache-Control", "no-store")
